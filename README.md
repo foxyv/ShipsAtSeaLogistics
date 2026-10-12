@@ -4,35 +4,72 @@ Logistics planner for Ships At Sea. A UE4SS Lua mod exports contracts, cargo and
 from the running game, and a PySide6 app turns that into a contract list, a view of the hold, and
 route plans. The mod can also highlight, in the game's inventory windows, the cargo to load next.
 
-## Parts
+## Install
 
-- `mod/SasLogistics` — UE4SS Lua mod. It reads game state and restyles inventory slots; it never
-  changes game state.
-  - F8 writes `snapshot.json` into its own folder under the game's `ue4ss\Mods\SasLogistics`.
-  - F7 toggles writing it every 20 seconds.
-  - F6 toggles highlighting the cargo listed in `highlight.txt`, which the app writes.
-- `app/saslogi` — the planner. It polls the snapshot and refreshes on its own.
-  - `model.py` loads a snapshot, `packing.py` fits cargo into the hold's cell grid, `planner.py`
-    searches for routes, `ui.py` is the window.
+You need Windows, the Steam version of Ships At Sea, and two things installed first.
 
-## Related
+**1. UE4SS, experimental build.** The game runs on Unreal Engine 5.7, which the stable UE4SS
+release does not support.
 
-The boat handling fixes that used to live here (the list fix and the boat physics recorder) are now
-in their own repo: https://github.com/foxyv/SasBoatFixes
+- Download `UE4SS_v3.0.1-<build>.zip` from
+  https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest
+- Extract it into the game's `SAS\Binaries\Win64` folder, next to `Sas-Win64-Shipping.exe`. You
+  should end up with `dwmapi.dll` and a `ue4ss` folder there.
 
-## Requirements
+**2. Python 3.10 or newer**, from https://www.python.org/downloads/, with the `py` launcher (the
+installer includes it by default).
 
-- UE4SS experimental build installed in `SAS\Binaries\Win64` (the game is on Unreal Engine 5.7).
-- Python 3 with PySide6, reachable through the `py` launcher.
+**Then install the planner:**
 
-## Use
+1. Download `ShipsAtSeaLogistics-<version>.zip` from the
+   [latest release](https://github.com/foxyv/ShipsAtSeaLogistics/releases/latest) and extract it
+   anywhere you like. Keep the folder; the app runs from it.
+2. Copy the `mod\SasLogistics` folder from the extracted files into the game's
+   `SAS\Binaries\Win64\ue4ss\Mods` folder, so that
+   `ue4ss\Mods\SasLogistics\Scripts\main.lua` exists.
+3. Open PowerShell in the extracted folder and install the app's one dependency:
 
-```
-.\deploy.ps1              # copy the mod into the game; Ctrl+R in game reloads UE4SS Lua mods
-.\run.ps1                 # start the planner
-.\install-shortcut.ps1    # desktop and Start Menu shortcuts with the app's own taskbar identity
-cd app; py -m unittest discover tests
-```
+   ```
+   py -m pip install -r app\requirements.txt
+   ```
+
+4. Start the planner:
+
+   ```
+   powershell -ExecutionPolicy Bypass -File .\run.ps1
+   ```
+
+   To get desktop and Start Menu shortcuts with the app's own icon instead:
+
+   ```
+   powershell -ExecutionPolicy Bypass -File .\install-shortcut.ps1
+   ```
+
+If your game is in the default Steam library on `D:`, `deploy.ps1` does step 2 for you; otherwise
+pass it the game folder: `.\deploy.ps1 -GameDir "X:\SteamLibrary\steamapps\common\Ships At Sea"`.
+
+### First run
+
+1. Start the game and load your save. The mod loads with the game.
+2. Press **F8** in game. The planner picks the snapshot up within a few seconds.
+3. Press **F7** to keep it updated every 20 seconds while you play.
+
+The planner looks for the snapshot in every Steam library on the machine. If it says "No snapshot
+yet", use the **Snapshot file…** button to point it at
+`SAS\Binaries\Win64\ue4ss\Mods\SasLogistics\snapshot.json`.
+
+### Uninstall
+
+Delete `ue4ss\Mods\SasLogistics` from the game folder, delete the extracted folder, and delete the
+two "Ships At Sea Logistics" shortcuts if you created them.
+
+## Keys in game
+
+- **F8** writes a snapshot now.
+- **F7** toggles writing one every 20 seconds. It is off after each game start.
+- **F6** toggles highlighting the cargo the planner wants loaded at the port you are in.
+
+The mod reads game state and restyles inventory slots. It never changes game state.
 
 ## How the planner behaves
 
@@ -45,16 +82,37 @@ cd app; py -m unittest discover tests
 - Spare space carries waiting cargo closer to its destination; cargo on board that the route does
   not deliver is left at the stop nearest its destination.
 
-## License
-
-Everything here is under the MIT license: see `LICENSE`. The mod folder carries its own copy so the
-license travels with the mod when it is deployed or shared without the rest of the repo.
-
 ## Known limits
 
+- Tested in solo play only.
 - Distances are straight lines between ports, not sea routes.
 - New cargo is placed first-fit; where the player actually sets it down with the crane may differ.
 - No weight limit was found in the game data, so the weight limit is entered by hand.
 - The route search is a beam search: a heuristic, not an exact optimiser.
-- The mod must do all its work on the game thread, from a single timer. An earlier version used
-  two background timers and crashed the game.
+
+## Related
+
+Boat handling fixes for the same game, including a fix for boats listing with passengers aboard:
+https://github.com/foxyv/SasBoatFixes
+
+## Working on it
+
+- `mod/SasLogistics` — the UE4SS Lua mod. It must do all its work on the game thread, from a single
+  timer; an earlier version used two background timers and crashed the game.
+- `app/saslogi` — the planner: `model.py` loads a snapshot, `packing.py` fits cargo into the hold's
+  cell grid, `planner.py` searches for routes, `ui.py` is the window.
+
+```
+.\deploy.ps1              # copy the mod into the game
+.\run.ps1                 # start the planner
+.\package.ps1 v0.1.0      # build the release zip into dist\
+cd app; py -m unittest discover tests
+```
+
+Ctrl+R in game reloads UE4SS Lua mods without a restart, if `EnableHotReloadSystem = 1` is set in
+`ue4ss\UE4SS-settings.ini`.
+
+## License
+
+Everything here is under the MIT license: see `LICENSE`. The mod folder carries its own copy so the
+license travels with the mod when it is deployed or shared without the rest of the repo.
