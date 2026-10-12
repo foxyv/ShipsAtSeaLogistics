@@ -12,5 +12,6 @@ foreach ($name in "SasLogistics", "SasBoatFixes") {
     New-Item -ItemType Directory -Force (Join-Path $target "Scripts") | Out-Null
     Copy-Item (Join-Path $PSScriptRoot "mod\$name\Scripts\main.lua") (Join-Path $target "Scripts\main.lua") -Force
     Copy-Item (Join-Path $PSScriptRoot "mod\$name\enabled.txt") (Join-Path $target "enabled.txt") -Force
+    Copy-Item (Join-Path $PSScriptRoot "mod\$name\LICENSE") (Join-Path $target "LICENSE") -Force
     "Deployed $name to $target"
 }

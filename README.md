@@ -48,6 +48,11 @@ cd app; py -m unittest discover tests
 - Spare space carries waiting cargo closer to its destination; cargo on board that the route does
   not deliver is left at the stop nearest its destination.
 
+## License
+
+Both mods are under the MIT license; each mod folder carries its own `LICENSE` file. The planner
+app in `app/` has no license file.
+
 ## Known limits
 
 - Distances are straight lines between ports, not sea routes.
