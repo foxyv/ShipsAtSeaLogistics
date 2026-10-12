@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 from collections import Counter, defaultdict
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer
@@ -14,11 +16,42 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .model import BOAT, Snapshot, load_snapshot
+from . import searoutes
+from .mapview import MapView
+from .model import AT_SEA, BOAT, Snapshot, load_snapshot
 from .packing import Hold
-from .planner import PRIORITIES, Capacity, advance, has_work, make_plan, remaining, waiting_by_contract
+from .planner import (
+    PRIORITIES, Capacity, advance, check_load, has_work, make_plan, remaining, waiting_by_contract,
+)
+
+# With auto export on the mod writes a snapshot every 20 seconds. Three missed in a row means it is
+# off, which is the case after every game start, or the game is not running.
+STALE_AFTER_SECONDS = 60
+
+
+def stale_warning(age_seconds: float) -> str:
+    """The warning to show for a snapshot this old, or "" while it is fresh enough."""
+    if age_seconds < STALE_AFTER_SECONDS:
+        return ""
+    minutes = int(age_seconds // 60)
+    if minutes < 60:
+        ago = f"{minutes} minute{'' if minutes == 1 else 's'}"
+    else:
+        hours = minutes // 60
+        ago = f"{hours} hour{'' if hours == 1 else 's'}" if hours < 48 else f"{hours // 24} days"
+    return (f"No update from the game for {ago}. What you see here may be out of date. "
+            "In game, press F7 to turn telemetry back on, or F8 for a single snapshot.")
+
 
 MOD_RELATIVE = r"steamapps\common\Ships At Sea\SAS\Binaries\Win64\ue4ss\Mods\SasLogistics\snapshot.json"
+
+
+# Distances are kept in km throughout; these are only for showing them. (label, km in one unit)
+DISTANCE_UNITS = {
+    "km": ("Kilometres (km)", 1.0),
+    "nm": ("Nautical miles (nm)", 1.852),
+    "mi": ("Miles (mi)", 1.609344),
+}
 
 
 def default_snapshot_path() -> str:
@@ -75,15 +108,30 @@ class MainWindow(QMainWindow):
         self.path = self.settings.value("snapshotPath", default_snapshot_path())
         self.snap = Snapshot()
         self.mtime = None
+        self.sea_km: dict = {}  # (port, port) -> km by sea; empty until sea routes are known
+        self.sea_routes: dict = {}  # "A|B" -> the route itself, for drawing on the map
+        self.sea_source = None  # what the routes in use were worked out from: (depth grid mtime, port positions)
+        self.sea_job = None  # a background route calculation in progress
+        self.sea_note = "Distances are straight lines between ports."
         self.committed = None  # the plan being followed; it is kept until something calls for a new one
         self.committed_at = ""
         self.known_cargo: set[str] = set()  # cargo that existed when that plan was made
 
         self.status = QLabel()
+        self.stale = QLabel()
+        self.stale.setWordWrap(True)
+        self.stale.setStyleSheet("color: #e5484d; font-weight: bold;")  # a red that reads on light and dark themes
+        self.stale.hide()
+        self.units = QComboBox()
+        self.units.setToolTip("Units for every distance shown. Routes are not replanned when this changes.")
+        for key, (label, _) in DISTANCE_UNITS.items():
+            self.units.addItem(label, key)
+        self.units.setCurrentIndex(max(0, self.units.findData(self.settings.value("distanceUnit", "km"))))
         browse = QPushButton("Snapshot file…")
         browse.clicked.connect(self.browse)
         top = QHBoxLayout()
         top.addWidget(self.status, 1)
+        top.addWidget(self.units)
         top.addWidget(browse)
 
         self.contracts = self._table(["ID", "Contract", "From", "To", "Delivered", "Cargo is at", "kg left", "Money left", "Status"])
@@ -100,17 +148,23 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(aboard_tab, "On board")
         self.tabs.addTab(self.matrix, "Cargo by port")
         self.tabs.addTab(self._route_tab(), "Route")
+        self.map = MapView()
+        self.tabs.addTab(self.map, "Map")
 
         layout = QVBoxLayout()
         layout.addLayout(top)
+        layout.addWidget(self.stale)
         layout.addWidget(self.tabs)
         root = QWidget()
         root.setLayout(layout)
         self.setCentralWidget(root)
 
+        self._label_units()
+        self.units.currentIndexChanged.connect(self.change_units)
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
-        self.timer.start(3000)
+        self.timer.start(1000)
         self.poll()
 
     @staticmethod
@@ -146,8 +200,9 @@ class MainWindow(QMainWindow):
         self.no_splits = QCheckBox("Never split a contract's cargo")
         self.no_splits.setToolTip("Only load a contract when all of its cargo waiting at that port fits.")
         self.no_splits.setChecked(self.settings.value("noSplits", "false") == "true")
-        self.highlight = QCheckBox("Highlight this port's loads in game")
-        self.highlight.setToolTip("Tints the cargo to load at the port you are in, in the game's inventory windows.")
+        self.highlight = QCheckBox("Highlight this port's cargo in game")
+        self.highlight.setToolTip("In the game's warehouse window and crane cargo list: green for cargo to load "
+                                  "or take out, orange for cargo to unload from the boat.")
         self.highlight.setChecked(self.settings.value("highlight", "true") == "true")
 
         form = QFormLayout()
@@ -165,8 +220,15 @@ class MainWindow(QMainWindow):
         replan_button = QPushButton("Replan from here")
         replan_button.setToolTip("Throw the current route away and plan a new one from the latest snapshot.")
         replan_button.clicked.connect(self.replan)
+        check_button = QPushButton("Check load now")
+        check_button.setToolTip("Asks the game for a fresh snapshot and compares the boat with this stop's instructions.")
+        check_button.clicked.connect(self.request_snapshot)
+        self.load_check = QLabel()
+        self.load_check.setWordWrap(True)
         side = QVBoxLayout()
         side.addLayout(form)
+        side.addWidget(check_button)
+        side.addWidget(self.load_check)
         side.addWidget(replan_button)
         side.addWidget(self.plan_summary)
         side.addStretch(1)
@@ -208,6 +270,30 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------------------------------
 
+    @property
+    def unit(self) -> str:
+        return self.units.currentData()
+
+    def distance(self, km: float | None, digits: int = 1) -> str:
+        """A distance held in km, written in the chosen unit; "?" when it is not known."""
+        return "?" if km is None else f"{km / DISTANCE_UNITS[self.unit][1]:.{digits}f}"
+
+    def _label_units(self):
+        unit = self.unit
+        self.matrix.setHorizontalHeaderItem(6, QTableWidgetItem(unit))
+        self.aboard.setHorizontalHeaderItem(6, QTableWidgetItem(f"{unit} from here"))
+        self.plan_tree.setHeaderLabels(["Stop", "Items", "kg", "Money", f"Leg {unit}"])
+        self.priority.setItemText(self.priority.findData("money"), f"Most money per {unit}")
+
+    def change_units(self):
+        """Redraws every distance in the new unit. The route itself is left alone."""
+        self.settings.setValue("distanceUnit", self.unit)
+        self._label_units()
+        self._fill_matrix()
+        self._fill_aboard()
+        if self.committed:
+            self.follow()
+
     def browse(self):
         chosen, _ = QFileDialog.getOpenFileName(self, "Snapshot written by the SasLogistics mod", self.path, "snapshot.json (*.json)")
         if chosen:
@@ -216,20 +302,86 @@ class MainWindow(QMainWindow):
             self.mtime = None
             self.poll()
 
+    def update_sea_routes(self):
+        """Keeps sea distances in step with the depth grid the mod wrote and the ports in the snapshot.
+
+        Routes come from a saved file when one matches; otherwise they are worked out on a background
+        thread, which takes a few seconds, and straight lines are used until that finishes.
+        """
+        grid_path = Path(self.path).with_name("depthgrid.txt")
+        ports = {p.id: p.location[:2] for p in self.snap.ports.values() if p.location and any(p.location[:2])}
+        job = self.sea_job
+        if job and job["done"]:
+            self.sea_job = None
+            if job["routes"] is not None:
+                searoutes.save_cache(grid_path.with_name("searoutes.json"), job["signature"], job["routes"])
+                self._use_sea_routes(job["routes"], job["source"])
+                if self.committed:
+                    self.sea_note += (" The route on screen was planned with straight lines; press Replan from "
+                                      "here to plan it again by sea.")
+                self.refresh()
+            return
+        if job:
+            self.sea_note = f"Distances are straight lines for now: working out sea routes ({job['at']} of {job['of']} ports)."
+            return
+        try:
+            source = (grid_path.stat().st_mtime, tuple(sorted(ports.items())))
+        except OSError:
+            self.sea_note = ("Distances are straight lines between ports. Sea routes need the depth map, which the "
+                             "mod writes the first time a save is loaded.")
+            return
+        if not ports or source == self.sea_source:
+            return
+        grid = searoutes.load_depth_grid(grid_path)
+        if grid is None:
+            return  # still being written
+        self.map.set_grid(grid)
+        wanted = searoutes.signature(grid, ports)
+        cached = searoutes.load_cache(grid_path.with_name("searoutes.json"), wanted)
+        if cached is not None:
+            self._use_sea_routes(cached, source)
+            return
+        job = {"done": False, "routes": None, "signature": wanted, "source": source, "at": 0, "of": len(ports)}
+
+        def work():
+            try:
+                job["routes"] = searoutes.compute_routes(grid, ports, lambda at, of: job.update(at=at, of=of))
+            finally:
+                job["done"] = True
+
+        self.sea_job = job
+        self.sea_note = "Distances are straight lines for now: working out sea routes from the game's depth map."
+        threading.Thread(target=work, daemon=True).start()
+
+    def _use_sea_routes(self, routes, source):
+        self.sea_km = searoutes.distances(routes)
+        self.sea_routes = routes
+        self.sea_source = source
+        self.snap.sea_km = self.sea_km
+        self.sea_note = (f"Distances follow the water: {len(routes)} sea routes worked out from the game's depth map. "
+                         "Ports with no route between them fall back to a straight line.")
+
     def poll(self):
+        self.update_sea_routes()
         try:
             mtime = os.path.getmtime(self.path)
         except OSError:
             self.status.setText(f"No snapshot yet. Press F8 in game.  ({self.path})")
+            self.stale.hide()
             return
+        warning = stale_warning(time.time() - mtime)
+        self.stale.setText(warning)
+        self.stale.setVisible(bool(warning))
         if mtime == self.mtime:
             return
         try:
             self.snap = load_snapshot(self.path)
+            self.snap.sea_km = self.sea_km
         except (OSError, ValueError) as error:  # the mod may be mid-write; try again next tick
             self.status.setText(f"Could not read snapshot: {error}")
             return
         self.mtime = mtime
+        self.update_sea_routes()  # the first snapshot is what tells us where the ports are
         self.refresh()
 
     def refresh(self):
@@ -253,7 +405,7 @@ class MainWindow(QMainWindow):
         wanted = self.start_port.currentData() if self.start_port.currentIndex() > 0 else None
         self.start_port.blockSignals(True)
         self.start_port.clear()
-        current = snap.current_port()
+        current = snap.here()
         self.start_port.addItem(f"Where I am ({snap.port_name(current)})" if current else "Where I am (unknown)", None)
         for port in sorted(snap.ports.values(), key=lambda p: p.name):
             self.start_port.addItem(port.name, port.id)
@@ -279,16 +431,22 @@ class MainWindow(QMainWindow):
                 mission.short_id, mission.title, snap.port_name(mission.start), snap.port_name(mission.end),
                 NumberItem(len(mission.items) - len(left), f"{len(mission.items) - len(left)} / {len(mission.items)}"),
                 ", ".join(f"{place} ×{n}" for place, n in places.most_common()) or "—",
-                NumberItem(sum(i.weight for i in left)), NumberItem(mission.remaining_value), mission.status,
+                NumberItem(sum(i.weight for i in left)), NumberItem(mission.remaining_value),
+                "Ready to complete: take out of warehouse" if mission.to_take_out else mission.status,
             ])
         self._fill(self.contracts, rows)
 
     def _write_highlights(self, plan):
-        """Tells the mod which cargo to highlight: what the plan loads at the port the player is in."""
+        """Tells the mod which cargo to highlight at the port the player is in: what to load, and, marked
+        with a U, what still has to come off the boat."""
         wanted = []
         first = plan.stops[0] if plan.stops else None
-        if self.highlight.isChecked() and first and first.port == self.snap.current_port():
+        if self.highlight.isChecked() and first and first.port == self.snap.docked_port():
             wanted = [i.guid for i in first.load] + [i.guid for i, _ in first.stage]
+            wanted += [f"{i.guid} U" for i in first.unload + first.drop]
+        if self.highlight.isChecked():  # cargo to take out to finish a contract, wherever the boat is docked
+            for mission in self.snap.completable_at(self.snap.docked_port()):
+                wanted += [i.guid for i in mission.to_take_out]
         target = Path(self.path).with_name("highlight.txt")
         try:
             if target.parent.is_dir():
@@ -298,14 +456,14 @@ class MainWindow(QMainWindow):
 
     def _fill_aboard(self):
         snap, rows = self.snap, []
-        here = snap.current_port()
+        here = snap.here()
         for held in snap.aboard:
             cargo = held.cargo
             if cargo:
                 km = snap.distance_km(here, cargo.dest)
                 rows.append([held.name, cargo.mission.short_id, cargo.mission.title, snap.port_name(cargo.dest),
                              NumberItem(held.weight), NumberItem(cargo.value),
-                             NumberItem(km if km is not None else -1, f"{km:.1f}" if km is not None else "?")])
+                             NumberItem(km if km is not None else -1, self.distance(km))])
             else:
                 rows.append([held.name, "", "Not contract cargo", "", NumberItem(held.weight), NumberItem(0, ""), NumberItem(-1, "")])
         self._fill(self.aboard, rows)
@@ -334,7 +492,7 @@ class MainWindow(QMainWindow):
             rows.append([
                 snap.port_name(place), where, snap.port_name(dest), NumberItem(len(items)),
                 NumberItem(sum(i.weight for i in items)), NumberItem(sum(i.value for i in items)),
-                NumberItem(km if km is not None else -1, f"{km:.1f}" if km is not None else "?"),
+                NumberItem(km if km is not None else -1, self.distance(km)),
             ])
         self._fill(self.matrix, rows)
         self.matrix.sortItems(0)
@@ -349,7 +507,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("highlight", "true" if self.highlight.isChecked() else "false")
         self.plan_tree.clear()
         snap = self.snap
-        start = self.start_port.currentData() or snap.current_port()
+        start = self.start_port.currentData() or snap.here()
         if not start:
             self.plan_summary.setText("Pick a start port: the snapshot has no player or port positions.")
             return
@@ -360,8 +518,50 @@ class MainWindow(QMainWindow):
                             allow_splits=not self.no_splits.isChecked())
         self.committed = make_plan(snap, start, capacity, self.priority.currentData(), self.max_stops.value())
         self.committed_at = snap.time[11:16]
+        self.sea_note = self.sea_note.split(" The route on screen")[0]
         self.known_cargo = {item.guid for item in snap.items}
         self.show_plan(self.committed)
+
+    def request_snapshot(self):
+        """Asks the mod to write a snapshot now, so a check does not wait for the next automatic one."""
+        try:
+            Path(self.path).with_name("request.txt").write_text("snapshot\n", encoding="ascii")
+            self.load_check.setText("Asked the game for a fresh snapshot…")
+        except OSError as error:
+            self.load_check.setText(f"Could not ask the game for a snapshot: {error}")
+
+    def _load_check_lines(self):
+        """The boat compared with the current stop's instructions, as (headline, detail lines)."""
+        plan = self.committed
+        if not plan or not plan.stops:
+            return "", []
+        stop, snap = plan.stops[0], self.snap
+        if snap.docked_port() != stop.port:
+            if snap.docked_port() is None:
+                # Under way: the next stop is the one after where the plan currently stands.
+                heading = plan.stops[1].port if len(plan.stops) > 1 else None
+                return "In transit" + (f" to {snap.port_name(heading)}." if heading else "."), []
+            return f"Load check: not docked at {snap.port_name(stop.port)}.", []
+        check = check_load(plan, snap)
+        finishing = snap.completable_at(stop.port)
+        if check.ready and not finishing:
+            done = f"all {check.planned} loaded" if check.planned else "nothing to load here"
+            return f"Load check: {done}, nothing left to unload. Ready to leave.", []
+        parts, lines = [], []
+        if finishing:
+            parts.append(f"{len(finishing)} contract{'' if len(finishing) == 1 else 's'} to complete from the warehouse")
+        if check.planned:
+            parts.append(f"{check.loaded} of {check.planned} loaded")
+        for label, items in (("still to load", check.to_load), ("still to unload", check.to_unload),
+                             ("on board but not in the plan", check.extra)):
+            if items:
+                parts.append(f"{len(items)} {label}")
+                by_mission = defaultdict(list)
+                for item in items:
+                    by_mission[item.mission.label].append(item)
+                for mission_label, group in sorted(by_mission.items()):
+                    lines.append(f"{label.capitalize()}: {mission_label}\n{summarise(group)}")
+        return "Load check: " + ", ".join(parts) + ".", lines
 
     def follow(self):
         """A new snapshot arrived. Keep the route being followed and only tick off what has been done;
@@ -376,6 +576,7 @@ class MainWindow(QMainWindow):
 
     def show_plan(self, plan):
         snap = self.snap
+        self.map.set_state(snap, plan, self.sea_routes)
         self.plan_tree.clear()
         waiting = waiting_by_contract(snap, plan)
         self._write_highlights(plan)
@@ -400,11 +601,28 @@ class MainWindow(QMainWindow):
                 title += f"  (leaves {stop.fill:.0%} full)"
             node = QTreeWidgetItem(self.plan_tree, [
                 title, str(stop.onboard_count), money(stop.onboard_weight), money(stop.earned),
-                "?" if stop.leg_km is None else f"{stop.leg_km:.1f}",
+                self.distance(stop.leg_km),
             ])
+            if number == 1:
+                headline, details = self._load_check_lines()
+                self.load_check.setText(headline + ("" if not details else "\n\n" + "\n\n".join(details)))
+                if headline:
+                    row = QTreeWidgetItem(node, [headline, "", "", "", ""])
+                    font = row.font(0)
+                    font.setBold(True)
+                    row.setFont(0, font)
+            # A whole contract sitting in this port's warehouse only needs taking out to be finished.
+            for mission in sorted(snap.completable_at(stop.port), key=lambda m: m.label):
+                cargo = mission.to_take_out
+                row = QTreeWidgetItem(node, [
+                    f"Take out of the warehouse to complete: {mission.label}\n{summarise(cargo)}",
+                    str(len(cargo)), money(sum(i.weight for i in cargo)), "", ""])
+                font = row.font(0)
+                font.setBold(True)
+                row.setFont(0, font)
             sections = [("Unload", stop.unload), ("Hand in from storage", stop.hand_in),
                         ("Leave in warehouse", stop.drop)]
-            if stop.unload_all:
+            if stop.unload_all and stop.unload:  # once it has all come off there is nothing left to say
                 # The whole boat comes off here, so there is nothing to pick out; warehouse drops are still listed.
                 everything = stop.unload + stop.drop
                 QTreeWidgetItem(node, ["Unload All", str(len(everything)), money(sum(i.weight for i in everything)),
@@ -432,7 +650,7 @@ class MainWindow(QMainWindow):
 
         on_boat = sum(1 for i in snap.undelivered() if i.location == BOAT)
         lines = [f"{len(plan.stops)} stops, {plan.delivered} items delivered, {money(plan.total_money)} earned, "
-                 f"{plan.total_km:.0f} km{' (some legs unknown)' if plan.has_unknown_distance else ''}."]
+                 f"{self.distance(plan.total_km, 0)} {self.unit}{' (some legs unknown)' if plan.has_unknown_distance else ''}."]
         lines.append(f"Following the route planned at {self.committed_at}. It stays put as you work through it and "
                      "is only replanned when you press Replan, change a setting, finish it, or dock at a port it "
                      "does not visit.")
@@ -455,5 +673,6 @@ class MainWindow(QMainWindow):
             lines.append(f"Hold: {x} × {y} × {z} cells{metres}.")
         else:
             lines.append("No hold found for your boat in the snapshot, so space is not checked.")
-        lines.append("Distances are straight lines between ports. Item counts in the Stop rows are what is on board when leaving.")
+        lines.append(self.sea_note)
+        lines.append("Item counts in the Stop rows are what is on board when leaving.")
         self.plan_summary.setText("\n\n".join(lines))

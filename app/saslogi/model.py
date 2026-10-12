@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 BOAT = "@boat"  # pseudo port id for cargo that is on a boat
+AT_SEA = "@sea"  # pseudo port id for where the boat is while it is under way between ports
 
 SPAWNED_TAG = "Mission.Data.Spawned"
 BOARDED_TAG = "Mission.Rewards.Delivery.BoardedReward"
@@ -20,7 +21,7 @@ ID_TAG = "Mission.Descriptor.MissionID"
 
 CARGO_SIZES = ["XS", "S", "M", "L", "XL", "XXL"]
 CM_PER_KM = 100_000.0
-DOCKED_KM = 0.2  # a boat this close to a port counts as being in it; neighbouring ports are 0.5 km apart
+DOCKED_KM = 0.3  # a boat this close to a port counts as being in it; neighbouring ports are 0.5 km apart
 
 
 @dataclass
@@ -81,6 +82,20 @@ class Mission:
         return f"{self.short_id} {self.title}".strip()
 
     @property
+    def to_take_out(self) -> list[CargoItem]:
+        """Cargo to take out of the destination warehouse to finish this contract.
+
+        A contract stays open while its cargo sits in the warehouse at its destination, even though
+        the game already counts each item as delivered. This is only non-empty once the whole
+        contract is at the destination, since taking out part of it finishes nothing.
+        """
+        if self.status != "InProgress" or not self.items or not self.end:
+            return []
+        if any(item.location != self.end for item in self.items):
+            return []
+        return [item for item in self.items if item.holder == "warehouse"]
+
+    @property
     def remaining_value(self) -> float:
         return sum(item.value for item in self.items)
 
@@ -118,11 +133,14 @@ class Snapshot:
     aboard: list[HoldItem] = field(default_factory=list)
     hold_cells_used: int = 0
     hold_blocked: list = field(default_factory=list)  # hold cells taken by things that are not contract cargo
+    sea_km: dict = field(default_factory=dict)  # (port, port) -> km by sea, when sea routes have been worked out
     errors: list[str] = field(default_factory=list)
 
     def port_name(self, port_id: str | None) -> str:
         if port_id == BOAT:
             return "On boat"
+        if port_id == AT_SEA:
+            return "In transit"
         if port_id is None:
             return "Not found"
         port = self.ports.get(port_id)
@@ -134,9 +152,18 @@ class Snapshot:
         return f"{name} (On the Dock)" if item.on_dock else name
 
     def distance_km(self, a: str | None, b: str | None) -> float | None:
-        """Straight-line distance; the game has no exported sea routes, so this ignores land."""
+        """Distance by sea where a sea route is known, otherwise the straight line, which ignores land."""
         if a == b:
             return 0.0
+        if AT_SEA in (a, b):
+            # From the boat's own position there is no worked-out sea route, so this is a straight line.
+            port, here = self.ports.get(b if a == AT_SEA else a or ""), self.boat_location()
+            if not port or not port.location or not here:
+                return None
+            return math.dist(here[:2], port.location[:2]) / CM_PER_KM
+        by_sea = self.sea_km.get((a, b))
+        if by_sea is not None:
+            return by_sea
         pa, pb = self.ports.get(a or ""), self.ports.get(b or "")
         if not pa or not pb or not pa.location or not pb.location:
             return None
@@ -165,6 +192,20 @@ class Snapshot:
         if port is None or here is None:
             return None
         return port if math.dist(self.ports[port].location[:2], here[:2]) / CM_PER_KM <= DOCKED_KM else None
+
+    def here(self) -> str | None:
+        """Where a plan made now should start: the port the boat is in, or AT_SEA while it is under way.
+
+        Falls back to the nearest port when the boat's position is not known at all.
+        """
+        docked = self.docked_port()
+        if docked:
+            return docked
+        return AT_SEA if self.boat_location() else self.current_port()
+
+    def completable_at(self, port: str | None) -> list[Mission]:
+        """Contracts that can be finished at this port by taking their cargo out of its warehouse."""
+        return [m for m in self.missions if m.end == port and m.to_take_out]
 
     def undelivered(self) -> list[CargoItem]:
         return [i for i in self.items if not i.delivered and i.mission.status == "InProgress"]

@@ -11,11 +11,11 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 
-from .model import BOAT, CargoItem, Snapshot
+from .model import AT_SEA, BOAT, CargoItem, Snapshot
 from .packing import Hold
 
 PRIORITIES = {
-    "money": "Most money per km",
+    "money": "Most money per km",  # the window relabels this with the chosen distance unit
     "stops": "Fewest stops",
     "full": "Fullest loads",
 }
@@ -106,6 +106,7 @@ class Stop:
     drop: list[CargoItem] = field(default_factory=list)  # left in storage here, the closest the route gets
     stage: list[tuple[CargoItem, str]] = field(default_factory=list)  # (cargo, port to leave it at): moved closer
     unload_all: bool = False  # nothing that arrived on the boat stays on it
+    aboard: list[str] = field(default_factory=list)  # guids of the cargo meant to be on board when leaving
     onboard_count: int = 0
     onboard_weight: float = 0.0
     fill: float | None = None  # how full the boat is when leaving
@@ -193,6 +194,45 @@ def remaining(plan: Plan, snap: Snapshot) -> Plan:
             stop, unload=current(stop.unload, aboard), drop=current(stop.drop, aboard), hand_in=current(stop.hand_in),
             load=current(stop.load, ashore), stage=[(i, staged[i.guid]) for i in current([i for i, _ in stop.stage], ashore)]))
     return Plan(stops=stops, left_behind=plan.left_behind)
+
+
+@dataclass
+class LoadCheck:
+    """How the boat compares, right now, with what the plan wants at the stop it is at."""
+
+    planned: int  # cargo the plan loads at this stop
+    to_load: list[CargoItem]  # of that, what is not on the boat yet
+    to_unload: list[CargoItem]  # cargo that should come off here and is still aboard
+    extra: list[CargoItem]  # aboard, but the plan does not have it leaving this stop on the boat
+
+    @property
+    def loaded(self) -> int:
+        return self.planned - len(self.to_load)
+
+    @property
+    def ready(self) -> bool:
+        return not (self.to_load or self.to_unload or self.extra)
+
+
+def check_load(plan: Plan, snap: Snapshot) -> LoadCheck | None:
+    """Checks the boat against the plan's first stop, using the plan as it was made, not what is left of it."""
+    if not plan.stops:
+        return None
+    stop = plan.stops[0]
+    fresh = {item.guid: item for item in snap.items}
+
+    def current(items):
+        return [fresh[i.guid] for i in items if i.guid in fresh and not fresh[i.guid].delivered]
+
+    planned = current(stop.load) + current([i for i, _ in stop.stage])
+    coming_off = current(stop.unload) + current(stop.drop)
+    expected = set(stop.aboard) | {i.guid for i in coming_off}
+    return LoadCheck(
+        planned=len(planned),
+        to_load=[i for i in planned if i.location != BOAT],
+        to_unload=[i for i in coming_off if i.location == BOAT],
+        extra=[i for i in snap.undelivered() if i.location == BOAT and i.guid not in expected] if stop.aboard else [],
+    )
 
 
 def has_work(plan: Plan) -> bool:
@@ -479,7 +519,7 @@ def _finish(snap, route, started_with, capacity, items, positions) -> Plan:
         if item.guid in delivered:
             continue
         reach = [(km, index) for index, stop in enumerate(stops)
-                 if (km := snap.distance_km(stop.port, item.dest)) is not None]
+                 if stop.port != AT_SEA and (km := snap.distance_km(stop.port, item.dest)) is not None]
         if reach:
             stops[min(reach)[1]].drop.append(item)
 
@@ -539,6 +579,7 @@ def _finish(snap, route, started_with, capacity, items, positions) -> Plan:
         still = {i.guid for i in onboard}
         stop.unload_all = bool(stop.unload) and not any(i.guid in still for i in arriving)
         stop.onboard_count, stop.onboard_weight, stop.fill = len(onboard), _weight(onboard), load.fill()
+        stop.aboard = [i.guid for i in onboard]
         arriving = onboard
     plan = Plan(stops=stops)
     plan.left_behind = len(items) - plan.delivered

@@ -1,7 +1,7 @@
 import unittest
 
-from saslogi.model import BOAT, parse_snapshot
-from saslogi.planner import Capacity, advance, has_work, make_plan, remaining, waiting_by_contract
+from saslogi.model import AT_SEA, BOAT, parse_snapshot
+from saslogi.planner import Capacity, advance, check_load, has_work, make_plan, remaining, waiting_by_contract
 
 
 def snapshot(missions, containers):
@@ -259,6 +259,92 @@ class PlannerTests(unittest.TestCase):
         done = snapshot([mission("m1", "B", ["g1", "g2"], delivered=["g1", "g2"]),
                          mission("m2", "C", ["g3"], delivered=["g3"])], [])
         self.assertFalse(has_work(remaining(advance(plan, "Port_C"), done)))
+
+    def test_load_check_compares_the_boat_with_the_current_stop(self):
+        missions = [mission("m1", "B", ["g1", "g2"]), mission("m2", "C", ["g3"]), mission("m3", "C", ["g4"])]
+        start = snapshot(missions[:2], [store("warehouse", "A", ["g1", "g2", "g3"])])
+        plan = make_plan(start, "Port_A", Capacity(), "stops", 3)
+        check = check_load(plan, start)
+        self.assertEqual((check.planned, check.loaded, len(check.to_load), check.ready), (3, 0, 3, False))
+
+        # Two of the three are aboard, plus a crate from a contract the plan knows nothing about.
+        partly = snapshot(missions, [store("boatCargoArea", None, ["g1", "g3", "g4"]), store("warehouse", "A", ["g2"])])
+        check = check_load(plan, partly)
+        self.assertEqual((check.loaded, [i.guid for i in check.to_load], [i.guid for i in check.extra]), (2, ["g2"], ["g4"]))
+        self.assertFalse(check.ready)
+
+        done = snapshot(missions[:2], [store("boatCargoArea", None, ["g1", "g2", "g3"])])
+        self.assertTrue(check_load(plan, done).ready)
+
+        # At B the two crates for B must come off; one still aboard is reported.
+        at_b = snapshot([mission("m1", "B", ["g1", "g2"], delivered=["g1"]), missions[1]],
+                        [store("boatCargoArea", None, ["g2", "g3"])])
+        check = check_load(advance(plan, "Port_B"), at_b)
+        self.assertEqual(([i.guid for i in check.to_unload], check.extra, check.ready), (["g2"], [], False))
+
+    def test_sea_distance_is_used_when_known(self):
+        snap = snapshot([mission("m1", "B", ["g1"])], [store("warehouse", "A", ["g1"])])
+        self.assertEqual(snap.distance_km("Port_A", "Port_B"), 10)
+        snap.sea_km = {("Port_A", "Port_B"): 14.0, ("Port_B", "Port_A"): 14.0}
+        self.assertEqual(snap.distance_km("Port_A", "Port_B"), 14.0)
+        self.assertEqual(snap.distance_km("Port_A", "Port_C"), 20)  # no sea route known: straight line
+        self.assertEqual(make_plan(snap, "Port_A", Capacity(), "stops", 2).total_km, 14.0)
+
+    def test_stale_snapshot_warning(self):
+        from saslogi.ui import stale_warning
+        self.assertEqual(stale_warning(0), "")
+        self.assertEqual(stale_warning(59), "")  # two missed 20-second exports is not yet a problem
+        self.assertIn("for 1 minute.", stale_warning(60))
+        self.assertIn("for 12 minutes.", stale_warning(12 * 60 + 30))
+        self.assertIn("for 3 hours.", stale_warning(3 * 3600 + 5))
+        self.assertIn("for 4 days.", stale_warning(4 * 86400 + 5))
+        self.assertIn("F7", stale_warning(600))
+        self.assertIn("F8", stale_warning(600))
+
+    def test_planning_from_sea_starts_in_transit(self):
+        # The boat is 4 km out from A, on the way towards B, carrying a crate for B and one for a port
+        # the route will not reach.
+        ports = [{"id": f"Port_{name}", "name": name, "location": [x * 100_000.0, 0.0, 0.0]}
+                 for name, x in (("A", 0), ("B", 10), ("C", 20), ("D", 60))]
+        data = {"ports": ports, "player": {"location": [400_000.0, 0.0, 0.0]},
+                "boats": [{"owned": True, "location": [400_000.0, 0.0, 0.0], "path": "B /L/b.Boat:P.B"}],
+                "missions": [mission("m1", "B", ["g1"]), mission("m2", "C", ["g2"]), mission("far", "D", ["g3"], money=1)],
+                "containers": [{"kind": "boatCargoArea", "path": "A /L/b.Boat:P.A", "items": [
+                    {"guid": "g1", "name": "Crate", "weight": 1.0}, {"guid": "g3", "name": "Crate", "weight": 1.0}]},
+                    store("warehouse", "B", ["g2"])]}
+        snap = parse_snapshot(data)
+        self.assertEqual((snap.docked_port(), snap.current_port(), snap.here()), (None, "Port_A", AT_SEA))
+        self.assertEqual(snap.port_name(AT_SEA), "In transit")
+        self.assertEqual(snap.distance_km(AT_SEA, "Port_B"), 6)
+
+        plan = make_plan(snap, snap.here(), Capacity(), "stops", max_stops=3)
+        self.assertEqual([s.port for s in plan.stops], [AT_SEA, "Port_B", "Port_C"])
+        self.assertEqual(plan.stops[1].leg_km, 6)  # measured from the boat, not from the port astern
+        first = plan.stops[0]
+        self.assertEqual((first.load, first.unload, first.drop), ([], [], []))  # nothing can be handled at sea
+        self.assertEqual([i.guid for i in plan.stops[2].drop], ["g3"])  # left at the real stop nearest D
+
+        # Still at sea nothing changes; docking at B drops the in-transit stop.
+        self.assertEqual(len(advance(plan, snap.docked_port()).stops), 3)
+        self.assertEqual([s.port for s in advance(plan, "Port_B").stops], ["Port_B", "Port_C"])
+
+    def test_whole_contract_in_destination_warehouse_is_ready_to_complete(self):
+        delivered = mission("done", "B", ["g1", "g2"], delivered=["g1", "g2"])
+        partly = mission("partly", "B", ["g3", "g4"], delivered=["g3"])
+        elsewhere = mission("elsewhere", "C", ["g5"])
+        snap = snapshot([delivered, partly, elsewhere],
+                        [store("warehouse", "B", ["g1", "g2", "g3"]), store("warehouse", "A", ["g4", "g5"])])
+        ready = snap.completable_at("Port_B")
+        self.assertEqual([m.id for m in ready], ["done"])
+        self.assertEqual(sorted(i.guid for i in ready[0].to_take_out), ["g1", "g2"])
+        self.assertEqual(snap.completable_at("Port_A"), [])  # cargo at a port that is not its destination
+        self.assertEqual(snap.completable_at("Port_C"), [])
+
+        # Already out on the dock: nothing left to take out. One still in the warehouse: just that one.
+        on_dock = snapshot([delivered], [store("cargoArea", "B", ["g1", "g2"])])
+        self.assertEqual(on_dock.completable_at("Port_B"), [])
+        mixed = snapshot([delivered], [store("cargoArea", "B", ["g1"]), store("warehouse", "B", ["g2"])])
+        self.assertEqual([i.guid for i in mixed.completable_at("Port_B")[0].to_take_out], ["g2"])
 
     def test_docked_only_when_close_to_a_port(self):
         data = {"ports": [{"id": "Port_A", "name": "A", "location": [0.0, 0.0, 0.0]},

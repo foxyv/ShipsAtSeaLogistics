@@ -1,7 +1,9 @@
 -- SasLogistics: read-only telemetry for the external logistics planner.
 -- F8 writes snapshot.json into this mod's folder; F7 toggles writing it every AUTO_EXPORT_SECONDS.
 -- F6 toggles highlighting, in any open inventory window, the cargo the planner wants loaded here.
--- Nothing here changes game state: highlighting only changes how inventory slots are drawn.
+-- Nothing here changes the game's own state. Highlighting changes how inventory slots are drawn and
+-- puts the game's in-world marker over cargo to unload; those markers are this mod's own and are
+-- removed again when the cargo comes off, when highlighting is switched off, and on reload.
 
 local AUTO_EXPORT_SECONDS = 20
 
@@ -455,9 +457,11 @@ RegisterKeyBind(Key.F7, function()
 end)
 
 ---------------------------------------------------------------------------------------------------
--- Highlighting. The planner writes the GUIDs of the cargo to load at this port into highlight.txt,
--- one per line. In an inventory window showing any of them, those slots are tinted green and the
--- rest are dimmed. Windows showing none of them are left alone.
+-- Highlighting. The planner writes the cargo to handle at this port into highlight.txt, one item
+-- per line: its GUID, optionally followed by "U" for cargo to unload from the boat. In an inventory
+-- window showing any of them, cargo to load or take out is tinted green, cargo to unload is tinted
+-- orange, and the rest is dimmed. Windows showing none of them are left alone. That covers the
+-- warehouse window and the cargo list beside the camera feed when operating a crane.
 
 local TICK_MS = 1000
 local HighlightPath = ScriptDir .. "\\..\\highlight.txt"
@@ -466,6 +470,7 @@ local Touched = false  -- has any slot's look been changed since everything was 
 local LastReport = ""
 
 local GREEN = { R = 0.25, G = 1.0, B = 0.25, A = 1.0 }
+local ORANGE = { R = 1.0, G = 0.55, B = 0.1, A = 1.0 }
 local WHITE = { R = 1.0, G = 1.0, B = 1.0, A = 1.0 }
 
 local function ReadHighlights()
@@ -473,9 +478,9 @@ local function ReadHighlights()
     local file = io.open(HighlightPath, "r")
     if not file then return wanted, 0 end
     for line in file:lines() do
-        local guid = line:match("^(%x+)%s*$")
+        local guid, kind = line:match("^(%x+)%s*(%a?)%s*$")
         if guid and #guid == 32 then
-            wanted[guid:upper()] = true
+            wanted[guid:upper()] = (kind == "U") and ORANGE or GREEN
             count = count + 1
         end
     end
@@ -485,7 +490,9 @@ end
 
 local function SlotGuid(slot)
     local ok, guid = pcall(function()
-        local item = slot.ViewModelData.Item
+        local model = slot.ViewModelData
+        if model == nil or not model:IsValid() then model = slot.SlotData end  -- crane cargo lists set this one
+        local item = model.Item
         if not item:IsValid() then return nil end
         return GuidStr(item.Guid)
     end)
@@ -538,7 +545,7 @@ local function UpdateHighlights()
             for _, pair in ipairs(window.slots) do
                 local slot, guid = pair[1], pair[2]
                 if window.hit and guid and wanted[guid] then
-                    Paint(slot, GREEN, 1.0)
+                    Paint(slot, wanted[guid], 1.0)
                 elseif window.hit and guid then
                     Paint(slot, WHITE, 0.3)
                 else
@@ -561,14 +568,266 @@ RegisterKeyBind(Key.F6, function()
 end)
 
 ---------------------------------------------------------------------------------------------------
+-- Unload markers. The game marks the dock cargo of the one mission being tracked with a floating
+-- icon. This puts the same kind of marker over every piece of cargo in the boat's hold that the plan
+-- says comes off at this port, whichever contract it belongs to, so it can be picked out from the
+-- crane. They are the game's own marker actors, created here and owned by nobody else; each carries
+-- the player controller as its instigator, which is how this mod recognises its own to remove them.
+
+local MARKER_TITLE = "UNLOAD"
+local MARKER_ICON = "/Game/ShipsAtSea/UI/WorldMap/Materials/Circle/MI_CargoMapIcon_Green.MI_CargoMapIcon_Green"
+local MARKER_TAG = "UIMapMarker.Type.Marker.Mission.Cargo.M"
+local MARKER_RAISE_CM = 100
+local Markers = {}            -- item guid -> marker actor
+local MarkerClass = nil
+local StrayMarkersCleared = false
+local MarkerReport = ""
+
+local function IsOurMarker(marker)
+    local ok, ours = pcall(function()
+        local instigator = marker.MarkerData.Instigator
+        return instigator:IsValid() and instigator:GetClass():GetFName():ToString():find("PlayerController", 1, true) ~= nil
+    end)
+    return ok and ours
+end
+
+-- Markers left by an earlier load of this mod are still in the world but no longer tracked.
+local function RemoveStrayMarkers()
+    for _, marker in ipairs(FindAllOf("MissionMarker") or {}) do
+        if IsOurMarker(marker) then pcall(function() marker:K2_DestroyActor() end) end
+    end
+end
+
+local function FindMarkerClass()
+    if IsObject(MarkerClass) then return MarkerClass end
+    for _, component in ipairs(FindAllOf("SasEmployeeMissionComponent") or {}) do
+        local ok, class = pcall(function() return component.MissionMarkerClass end)
+        if ok and IsObject(class) then
+            MarkerClass = class
+            return class
+        end
+    end
+    return nil
+end
+
+-- One of the game's own cargo markers, if any is showing, to copy the look from.
+local function TemplateMarker()
+    for _, marker in ipairs(FindAllOf("MissionMarker") or {}) do
+        local ok, usable = pcall(function()
+            return not IsOurMarker(marker) and marker.MarkerData.Icon.ResourceObject:IsValid()
+                and marker.MarkerData.MissionMarkerTag.TagName:ToString() == MARKER_TAG
+        end)
+        if ok and usable then return marker end
+    end
+    return nil
+end
+
+local function SpawnMarker(cargo, controller, statics)
+    local class = FindMarkerClass()
+    if not class then return nil end
+    local at = cargo:K2_GetActorLocation()
+    local transform = { Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 },
+                        Translation = { X = at.X, Y = at.Y, Z = at.Z + MARKER_RAISE_CM },
+                        Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 } }
+    local marker = statics:BeginDeferredActorSpawnFromClass(controller, class, transform, 1, nil, 0)
+    if not IsObject(marker) then return nil end
+    statics:FinishSpawningActor(marker, transform, 0)
+
+    local template = TemplateMarker()
+    if template then
+        pcall(function() marker:Init(template.MarkerData) end)
+    else
+        pcall(function()
+            local icon = StaticFindObject(MARKER_ICON)
+            if not IsObject(icon) then icon = LoadAsset(MARKER_ICON) end
+            marker.MarkerData.Icon.ResourceObject = icon
+            marker.MarkerData.Icon.ImageSize = { X = 86.0, Y = 86.0 }
+        end)
+        pcall(function() marker.MarkerData.MissionMarkerTag.TagName = FName(MARKER_TAG) end)
+    end
+    local data = marker.MarkerData
+    pcall(function() data.WidgetTitle = FText(MARKER_TITLE) end)
+    pcall(function() data.Instigator = controller end)
+    pcall(function() data.AttachedToActor = cargo end)
+    pcall(function() data.Location = { X = at.X, Y = at.Y, Z = at.Z } end)
+    pcall(function() marker:Update(marker.MarkerData) end)
+    pcall(function() marker:K2_AttachToActor(cargo, FName("None"), 1, 1, 1, false) end)  -- keep its place, follow the cargo
+    pcall(function() marker:SetVisibility(true) end)
+    return marker
+end
+
+-- `unload` is the set of item guids to mark. A marker is kept only while its cargo is in a boat's
+-- hold, so it goes as soon as the crane lifts the cargo out, without waiting for the next snapshot.
+local function UpdateMarkers(unload)
+    if not StrayMarkersCleared then
+        StrayMarkersCleared = true
+        RemoveStrayMarkers()
+    end
+    local wanted = next(unload) ~= nil
+    if not wanted and next(Markers) == nil then return end
+
+    local inHold, made = {}, 0
+    if wanted then
+        local controller = FindFirstOf("PlayerController")
+        local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        if IsObject(controller) and IsObject(statics) then
+            for _, cargo in ipairs(FindAllOf("Cargo") or {}) do
+                pcall(function()
+                    if not cargo:IsValid() then return end
+                    local area = cargo.CargoArea
+                    if not area:IsValid() or not area:GetClass():GetFName():ToString():find("BoatCargoArea", 1, true) then return end
+                    local guid = GuidStr(cargo:GetRepresentedInventoryItem().Guid)
+                    if not unload[guid] then return end
+                    inHold[guid] = true
+                    if not IsObject(Markers[guid]) then
+                        Markers[guid] = SpawnMarker(cargo, controller, statics)
+                        if Markers[guid] then made = made + 1 end
+                    end
+                end)
+            end
+        end
+    end
+    local shown = 0
+    for guid, marker in pairs(Markers) do
+        if inHold[guid] then
+            shown = shown + 1
+        else
+            pcall(function() marker:K2_DestroyActor() end)
+            Markers[guid] = nil
+        end
+    end
+    local report = string.format("%d cargo to unload marked in the hold", shown)
+    if report ~= MarkerReport then
+        MarkerReport = report
+        print("[SasLogistics] markers: " .. report .. "\n")
+    end
+end
+
+local function UnloadWanted()
+    local unload = {}
+    if not HighlightOn then return unload end
+    local wanted = ReadHighlights()
+    for guid, colour in pairs(wanted) do
+        if colour == ORANGE then unload[guid] = true end
+    end
+    return unload
+end
+
+---------------------------------------------------------------------------------------------------
+-- Depth grid. The planner works out sea routes between ports, and for that it needs to know where
+-- the water is. The first time a save is loaded this samples the game's water depth every 50 m
+-- across the area the ports cover and writes depthgrid.txt; after that the file is left alone.
+-- Delete the file to have it sampled again.
+--
+-- File: a header line "sasdepth 1 <origin x> <origin y> <cell cm> <columns> <rows> <min boat depth cm>",
+-- then one line per row (south-going y), depths in whole metres west to east; negative is land.
+
+local DEPTH_CELL_CM = 5000
+local DEPTH_PADDING_CM = 200000  -- sampled this far beyond the outermost ports
+local DEPTH_ROWS_PER_STEP = 3    -- about 10 ms of work per step, so the game does not stutter
+local DEPTH_STEP_MS = 100
+local DepthPath = ScriptDir .. "\\..\\depthgrid.txt"
+local Depth = nil            -- sampling state while a grid is being written
+local DepthSettled = false   -- the grid exists, or is being sampled, or sampling has failed too often
+local DepthFailures = 0
+
+local function DepthStep()
+    local job = Depth
+    if not job then return true end
+    local ok, err = pcall(function()
+        for _ = 1, DEPTH_ROWS_PER_STEP do
+            if job.row >= job.rows then break end
+            local y = job.minY + job.row * DEPTH_CELL_CM
+            local cells = {}
+            for col = 0, job.cols - 1 do
+                local metres = job.env:GetWaterDepth({ X = job.minX + col * DEPTH_CELL_CM, Y = y, Z = 0 }) / 100
+                -- Outside the mapped area the game reports an enormous land height.
+                if metres ~= metres or metres < -99 then metres = -99 elseif metres > 999 then metres = 999 end
+                cells[col + 1] = string.format("%.0f", metres)
+            end
+            job.file:write(table.concat(cells, " "), "\n")
+            job.row = job.row + 1
+        end
+    end)
+    if ok and job.row < job.rows then return false end
+
+    job.file:close()
+    Depth = nil
+    if ok then
+        os.remove(DepthPath)
+        os.rename(DepthPath .. ".tmp", DepthPath)
+        print(string.format("[SasLogistics] depth grid written: %.0f x %.0f cells\n", job.cols, job.rows))
+    else
+        os.remove(DepthPath .. ".tmp")
+        DepthFailures = DepthFailures + 1
+        DepthSettled = DepthFailures >= 3  -- otherwise try again from the top on a later tick
+        print("[SasLogistics] depth grid sampling stopped: " .. tostring(err):gsub("\n.*", "") .. "\n")
+    end
+    return true
+end
+
+local function StartDepthGrid()
+    local existing = io.open(DepthPath, "r")
+    if existing then
+        existing:close()
+        DepthSettled = true
+        return
+    end
+    local env, portSubsystem = FindFirstOf("EnvironmentSubsystem"), FindFirstOf("PortSubsystem")
+    if not IsObject(env) or not IsObject(portSubsystem) then return end
+
+    local minX, maxX, minY, maxY, count = math.huge, -math.huge, math.huge, -math.huge, 0
+    for _, port in ipairs(FindAllOf("Port") or {}) do
+        pcall(function()
+            if port:GetFullName():find("Default__", 1, true) then return end
+            local at = portSubsystem:GetPortLocation(port)
+            if at.X == 0 and at.Y == 0 then return end  -- placeholder ports sit at the origin
+            minX, maxX = math.min(minX, at.X), math.max(maxX, at.X)
+            minY, maxY = math.min(minY, at.Y), math.max(maxY, at.Y)
+            count = count + 1
+        end)
+    end
+    if count < 5 then return end  -- not in a loaded save yet
+
+    minX, minY = minX - DEPTH_PADDING_CM, minY - DEPTH_PADDING_CM
+    local cols = math.floor((maxX + DEPTH_PADDING_CM - minX) / DEPTH_CELL_CM) + 1
+    local rows = math.floor((maxY + DEPTH_PADDING_CM - minY) / DEPTH_CELL_CM) + 1
+    local file = io.open(DepthPath .. ".tmp", "w")
+    if not file then return end
+    local minDepth = 500
+    pcall(function() minDepth = env:GetMinWaterDepthForBoats() end)
+    file:write(string.format("sasdepth 1 %.0f %.0f %.0f %.0f %.0f %.0f\n", minX, minY, DEPTH_CELL_CM, cols, rows, minDepth))
+    Depth = { env = env, file = file, minX = minX, minY = minY, cols = cols, rows = rows, row = 0 }
+    DepthSettled = true
+    print(string.format("[SasLogistics] sampling the depth grid: %.0f x %.0f cells\n", cols, rows))
+    -- Its own timer, also on the game thread, so the rows go by quickly without one long pause.
+    if LoopInGameThreadWithDelay then
+        LoopInGameThreadWithDelay(DEPTH_STEP_MS, DepthStep)
+    end
+end
+
+---------------------------------------------------------------------------------------------------
 -- The one timer. It runs on the game thread, which is the only place game objects may be touched.
 -- An earlier version used LoopAsync plus ExecuteInGameThread from two background timers; those raced
 -- on the Lua state and brought the game down.
 
+local RequestPath = ScriptDir .. "\\..\\request.txt"
 local Ticks = 0
 
 local function Tick()
     Ticks = Ticks + 1
+    if not DepthSettled and Ticks % 5 == 0 then
+        pcall(StartDepthGrid)
+    elseif Depth and not LoopInGameThreadWithDelay then
+        pcall(DepthStep)  -- older UE4SS builds: sample on this timer instead, more slowly
+    end
+    -- The planner asks for a snapshot by leaving a request file here.
+    local request = io.open(RequestPath, "r")
+    if request then
+        request:close()
+        os.remove(RequestPath)
+        ExportRequested = true
+    end
     if ExportRequested then
         ExportRequested = false
         pcall(Export, "manual")
@@ -576,6 +835,9 @@ local function Tick()
         pcall(Export, "auto")
     end
     pcall(UpdateHighlights)
+    if Ticks % 2 == 0 then
+        pcall(function() UpdateMarkers(UnloadWanted()) end)
+    end
     return false
 end
 
@@ -589,5 +851,5 @@ else
     end)
 end
 
-print("[SasLogistics] loaded: F8 = write snapshot, F7 = toggle auto export, F6 = toggle highlighting\n")
+print("[SasLogistics] loaded: F8 = write snapshot, F7 = toggle auto export, F6 = toggle highlighting and unload markers\n")
 
