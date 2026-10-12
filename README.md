@@ -47,8 +47,8 @@ cd app; py -m unittest discover tests
 
 ## License
 
-The mod is under the MIT license; see `mod/SasLogistics/LICENSE`. The planner app in `app/` has no
-license file.
+Everything here is under the MIT license: see `LICENSE`. The mod folder carries its own copy so the
+license travels with the mod when it is deployed or shared without the rest of the repo.
 
 ## Known limits
 
