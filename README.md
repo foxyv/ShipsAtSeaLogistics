@@ -11,6 +11,14 @@ route plans. The mod can also highlight, in the game's inventory windows, the ca
   - F8 writes `snapshot.json` into its own folder under the game's `ue4ss\Mods\SasLogistics`.
   - F7 toggles writing it every 20 seconds.
   - F6 toggles highlighting the cargo listed in `highlight.txt`, which the app writes.
+- `mod/SasBoatFixes` — a separate UE4SS Lua mod for boat handling. Unlike the logistics mod, it
+  changes how the game behaves.
+  - The list fix is on by default; F4 toggles it. Crew and passengers no longer press down on the
+    deck they stand on. Without it a boat with people aboard could heel over in a turn and stay
+    heeled at speed: the class 3 service vessel held 17 degrees of list at 26 knots.
+  - F9 starts and stops a physics recording of the boat being driven, written to `boatlog.txt` in
+    the mod's folder: mass, centre of mass, buoyancy settings, who is aboard, and roll, pitch,
+    heading and speed four times a second.
 - `app/saslogi` — the planner. It polls the snapshot and refreshes on its own.
   - `model.py` loads a snapshot, `packing.py` fits cargo into the hold's cell grid, `planner.py`
     searches for routes, `ui.py` is the window.
@@ -23,7 +31,7 @@ route plans. The mod can also highlight, in the game's inventory windows, the ca
 ## Use
 
 ```
-.\deploy.ps1              # copy the mod into the game; Ctrl+R in game reloads UE4SS Lua mods
+.\deploy.ps1              # copy both mods into the game; Ctrl+R in game reloads UE4SS Lua mods
 .\run.ps1                 # start the planner
 .\install-shortcut.ps1    # desktop and Start Menu shortcuts with the app's own taskbar identity
 cd app; py -m unittest discover tests
@@ -46,5 +54,7 @@ cd app; py -m unittest discover tests
 - New cargo is placed first-fit; where the player actually sets it down with the crane may differ.
 - No weight limit was found in the game data, so the weight limit is entered by hand.
 - The route search is a beam search: a heuristic, not an exact optimiser.
-- The mod must do all its work on the game thread. An earlier version used two background timers
-  and crashed the game.
+- Each mod must do all its work on the game thread, from a single timer. An earlier version of the
+  logistics mod used two background timers and crashed the game.
+- The list fix removes what holds a boat over; it does not change the hulls' weak righting force
+  at speed.
