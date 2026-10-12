@@ -18,7 +18,7 @@ route plans. The mod can also highlight, in the game's inventory windows, the ca
 ## Related
 
 The boat handling fixes that used to live here (the list fix and the boat physics recorder) are now
-in their own repo, `SasBoatFixes`.
+in their own repo: https://github.com/foxyv/SasBoatFixes
 
 ## Requirements
 
