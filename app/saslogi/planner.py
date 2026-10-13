@@ -235,6 +235,30 @@ def check_load(plan: Plan, snap: Snapshot) -> LoadCheck | None:
     )
 
 
+def completing_unloads(snap: Snapshot, stop: Stop) -> list[tuple]:
+    """Contracts that this stop's unloading finishes off, with the cargo to take out of the warehouse.
+
+    When part of a contract is already in its destination's warehouse and the boat brings the rest,
+    unloading is not the end of it: the stored part has to come out of the warehouse too. Each entry
+    is (mission, the items in the warehouse). Contracts already wholly at the port are not included;
+    `Snapshot.completable_at` covers those.
+    """
+    arriving: dict[str, set[str]] = defaultdict(set)
+    for item in stop.unload:
+        if item.dest == stop.port:
+            arriving[item.mission.id].add(item.guid)
+    found = []
+    for mission in snap.missions:
+        coming = arriving.get(mission.id)
+        if not coming or mission.status != "InProgress":
+            continue
+        if all(item.guid in coming or item.location == mission.end for item in mission.items):
+            stored = [item for item in mission.items if item.location == mission.end and item.holder == "warehouse"]
+            if stored:
+                found.append((mission, stored))
+    return found
+
+
 def has_work(plan: Plan) -> bool:
     return any(s.unload or s.hand_in or s.drop or s.load or s.stage for s in plan.stops)
 

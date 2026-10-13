@@ -85,6 +85,8 @@ changes cargo, contracts, money or anything else the game saves.
   plan made then starts from the boat's own position.
 - A contract whose cargo is all in its destination's warehouse is shown as ready to complete, with
   an instruction at that port to take the cargo out of the warehouse, which is what finishes it.
+  When the boat is bringing the last of a contract whose other cargo is already stored there, the
+  stop says so up front: unload, then take the stored part out too.
 - At the port the boat is docked in, a load check compares what is on board with that stop's
   instructions: how much is loaded, what is still to load or unload, and anything aboard that the
   plan does not expect. **Check load now** asks the game for a fresh snapshot first.

@@ -21,7 +21,8 @@ from .mapview import MapView
 from .model import AT_SEA, BOAT, Snapshot, load_snapshot
 from .packing import Hold
 from .planner import (
-    PRIORITIES, Capacity, advance, check_load, has_work, make_plan, remaining, waiting_by_contract,
+    PRIORITIES, Capacity, advance, check_load, completing_unloads, has_work, make_plan, remaining,
+    waiting_by_contract,
 )
 
 # With auto export on the mod writes a snapshot every 20 seconds. Three missed in a row means it is
@@ -444,6 +445,8 @@ class MainWindow(QMainWindow):
         if self.highlight.isChecked() and first and first.port == self.snap.docked_port():
             wanted = [i.guid for i in first.load] + [i.guid for i, _ in first.stage]
             wanted += [f"{i.guid} U" for i in first.unload + first.drop]
+            for _, stored in completing_unloads(self.snap, first):  # the stored part of a contract being finished
+                wanted += [i.guid for i in stored]
         if self.highlight.isChecked():  # cargo to take out to finish a contract, wherever the boat is docked
             for mission in self.snap.completable_at(self.snap.docked_port()):
                 wanted += [i.guid for i in mission.to_take_out]
@@ -617,6 +620,14 @@ class MainWindow(QMainWindow):
                 row = QTreeWidgetItem(node, [
                     f"Take out of the warehouse to complete: {mission.label}\n{summarise(cargo)}",
                     str(len(cargo)), money(sum(i.weight for i in cargo)), "", ""])
+                font = row.font(0)
+                font.setBold(True)
+                row.setFont(0, font)
+            # The boat brings the last of a contract whose other cargo is already in this warehouse.
+            for mission, stored in sorted(completing_unloads(snap, stop), key=lambda pair: pair[0].label):
+                row = QTreeWidgetItem(node, [
+                    f"Once unloaded, also take out of the warehouse to complete: {mission.label}\n{summarise(stored)}",
+                    str(len(stored)), money(sum(i.weight for i in stored)), "", ""])
                 font = row.font(0)
                 font.setBold(True)
                 row.setFont(0, font)

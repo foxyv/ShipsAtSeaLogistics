@@ -1,7 +1,9 @@
 import unittest
 
 from saslogi.model import AT_SEA, BOAT, parse_snapshot
-from saslogi.planner import Capacity, advance, check_load, has_work, make_plan, remaining, waiting_by_contract
+from saslogi.planner import (
+    Capacity, advance, check_load, completing_unloads, has_work, make_plan, remaining, waiting_by_contract,
+)
 
 
 def snapshot(missions, containers):
@@ -345,6 +347,25 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(on_dock.completable_at("Port_B"), [])
         mixed = snapshot([delivered], [store("cargoArea", "B", ["g1"]), store("warehouse", "B", ["g2"])])
         self.assertEqual([i.guid for i in mixed.completable_at("Port_B")[0].to_take_out], ["g2"])
+
+    def test_unloading_the_rest_of_a_contract_calls_for_the_stored_part(self):
+        # Two of this contract's crates were delivered earlier and sit in B's warehouse; the boat brings the third.
+        finishing = mission("finishing", "B", ["g1", "g2", "g3"], delivered=["g1", "g2"])
+        # This one still has a crate back at A, so unloading at B does not finish it.
+        unfinished = mission("unfinished", "B", ["g4", "g5", "g6"], delivered=["g4"])
+        snap = snapshot([finishing, unfinished],
+                        [store("warehouse", "B", ["g1", "g2", "g4"]), store("boatCargoArea", None, ["g3", "g5"]),
+                         store("warehouse", "A", ["g6"])])
+        plan = make_plan(snap, "Port_B", Capacity(), "stops", max_stops=1)
+        stop = plan.stops[0]
+        self.assertEqual(sorted(i.guid for i in stop.unload), ["g3", "g5"])
+        found = completing_unloads(snap, stop)
+        self.assertEqual([(m.id, sorted(i.guid for i in stored)) for m, stored in found], [("finishing", ["g1", "g2"])])
+        self.assertEqual(snap.completable_at("Port_B"), [])  # not complete yet: one crate is still aboard
+
+        # Stored part already out on the dock: nothing to take out of the warehouse.
+        on_dock = snapshot([finishing], [store("cargoArea", "B", ["g1", "g2"]), store("boatCargoArea", None, ["g3"])])
+        self.assertEqual(completing_unloads(on_dock, make_plan(on_dock, "Port_B", Capacity(), "stops", 1).stops[0]), [])
 
     def test_docked_only_when_close_to_a_port(self):
         data = {"ports": [{"id": "Port_A", "name": "A", "location": [0.0, 0.0, 0.0]},
