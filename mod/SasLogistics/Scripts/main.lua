@@ -451,16 +451,41 @@ RegisterKeyBind(Key.F8, function()
     ExportRequested = true
 end)
 
+-- On-screen notices, shown with the game's own toast messages. A key press only queues the text;
+-- it is sent from the game thread a moment later.
+local TOAST_CHANNEL = "Channel.Toast.Simple.Info"
+local Notices = {}
+
+local function Notify(text)
+    Notices[#Notices + 1] = text
+end
+
+local function SendNotices()
+    if #Notices == 0 then return end
+    local texts = Notices
+    Notices = {}
+    local library = StaticFindObject("/Script/SasGameplayMessageSystem.Default__SasToastFunctionLibrary")
+    local controller = FindFirstOf("PlayerController")
+    if not IsObject(library) or not IsObject(controller) then return end
+    for _, text in ipairs(texts) do
+        local ok, err = pcall(function()
+            library:SendSimpleToast(controller, { TagName = FName(TOAST_CHANNEL) }, FText(text), controller)
+        end)
+        if not ok then print("[SasLogistics] notice failed: " .. tostring(err):gsub("\n.*", "") .. "\n") end
+    end
+end
+
 RegisterKeyBind(Key.F7, function()
     AutoExport = not AutoExport
     print("[SasLogistics] auto export " .. (AutoExport and ("on, every " .. AUTO_EXPORT_SECONDS .. " s") or "off") .. "\n")
+    Notify("Logistics telemetry " .. (AutoExport and "ON" or "OFF"))
 end)
 
 ---------------------------------------------------------------------------------------------------
 -- Highlighting. The planner writes the cargo to handle at this port into highlight.txt, one item
 -- per line: its GUID, optionally followed by "U" for cargo to unload from the boat. In an inventory
 -- window showing any of them, cargo to load or take out is tinted green, cargo to unload is tinted
--- orange, and the rest is dimmed. Windows showing none of them are left alone. That covers the
+-- orange, and the rest is left as it is. That covers the
 -- warehouse window and the cargo list beside the camera feed when operating a crane.
 
 local TICK_MS = 1000
@@ -468,6 +493,8 @@ local HighlightPath = ScriptDir .. "\\..\\highlight.txt"
 local HighlightOn = true
 local Touched = false  -- has any slot's look been changed since everything was last put back
 local LastReport = ""
+local Wanted = {}      -- the last highlight list read, kept for the slot hooks
+local Pending = {}     -- slots the game has just refilled, to be tinted again a moment later
 
 local GREEN = { R = 0.25, G = 1.0, B = 0.25, A = 1.0 }
 local ORANGE = { R = 1.0, G = 0.55, B = 0.1, A = 1.0 }
@@ -520,6 +547,7 @@ end
 local function UpdateHighlights()
     local wanted, count = {}, 0
     if HighlightOn then wanted, count = ReadHighlights() end
+    Wanted = wanted
     if count == 0 and not Touched then return end
     local wasTouched = Touched
 
@@ -544,10 +572,8 @@ local function UpdateHighlights()
         for _, window in pairs(windows) do
             for _, pair in ipairs(window.slots) do
                 local slot, guid = pair[1], pair[2]
-                if window.hit and guid and wanted[guid] then
+                if guid and wanted[guid] then
                     Paint(slot, wanted[guid], 1.0)
-                elseif window.hit and guid then
-                    Paint(slot, WHITE, 0.3)
                 else
                     Paint(slot, WHITE, 1.0)
                 end
@@ -562,9 +588,62 @@ local function UpdateHighlights()
     end
 end
 
+-- Taking an item out makes the game refill its inventory slots, which puts them back to their normal
+-- look. Waiting for the next pass would leave them untinted for up to a second, so each slot is
+-- tinted again as the game fills it, and once more a moment later in case the game's own setup of
+-- the slot ran after the hook did.
+local function TintSlot(slot, guid)
+    if not IsObject(slot) then return end
+    guid = guid or SlotGuid(slot)
+    local colour = guid and Wanted[guid]
+    if colour then
+        Paint(slot, colour, 1.0)
+        Touched = true
+    elseif Touched then
+        Paint(slot, WHITE, 1.0)  -- a reused slot may still carry the tint of the item it showed before
+    end
+end
+
+local function OnSlotFilled(context, data)
+    pcall(function()
+        if next(Wanted) == nil and not Touched then return end
+        local slot = context:get()
+        local guid = nil
+        pcall(function() guid = GuidStr(data:get().Item.Guid) end)
+        TintSlot(slot, guid)
+        Pending[#Pending + 1] = slot
+    end)
+end
+
+local SLOT_CLASS = "/Game/ShipsAtSea/UI/Inventories/Items/WBP_ItemInventorySlot.WBP_ItemInventorySlot_C"
+local SlotHooks = { [SLOT_CLASS .. ":OnListItemObjectSet"] = false, [SLOT_CLASS .. ":SetSlotData"] = false }
+
+-- The slot's blueprint is only loaded once an inventory window has been opened, so keep trying.
+local function HookSlots()
+    for path, done in pairs(SlotHooks) do
+        if not done and pcall(RegisterHook, path, OnSlotFilled, OnSlotFilled) then
+            SlotHooks[path] = true
+            print("[SasLogistics] highlight: following " .. path:match("[^:]+$") .. "\n")
+        end
+    end
+end
+
+local function TintPending()
+    pcall(SendNotices)
+    if #Pending > 0 then
+        local slots = Pending
+        Pending = {}
+        for _, slot in ipairs(slots) do
+            pcall(TintSlot, slot, nil)
+        end
+    end
+    return false
+end
+
 RegisterKeyBind(Key.F6, function()
     HighlightOn = not HighlightOn
     print("[SasLogistics] highlighting " .. (HighlightOn and "on" or "off") .. "\n")
+    Notify("Logistics highlighting " .. (HighlightOn and "ON" or "OFF"))
 end)
 
 ---------------------------------------------------------------------------------------------------
@@ -835,6 +914,7 @@ local function Tick()
         pcall(Export, "auto")
     end
     pcall(UpdateHighlights)
+    pcall(HookSlots)
     if Ticks % 2 == 0 then
         pcall(function() UpdateMarkers(UnloadWanted()) end)
     end
@@ -842,6 +922,7 @@ local function Tick()
 end
 
 if LoopInGameThreadWithDelay then
+    LoopInGameThreadWithDelay(30, TintPending)
     LoopInGameThreadWithDelay(TICK_MS, Tick)
 else
     -- Older UE4SS builds: a single background timer that hands each tick to the game thread.
