@@ -205,6 +205,10 @@ class MainWindow(QMainWindow):
         self.highlight.setToolTip("In the game's warehouse window and crane cargo list: green for cargo to load "
                                   "or take out, orange for cargo to unload from the boat.")
         self.highlight.setChecked(self.settings.value("highlight", "true") == "true")
+        self.crane_orders = QCheckBox("Send orders to the crane operator")
+        self.crane_orders.setToolTip("With the SasCraneOperator mod, the boat's crane operator loads and unloads "
+                                     "this port's cargo as planned. Off, they only move cargo you mark yourself.")
+        self.crane_orders.setChecked(self.settings.value("craneOrders", "true") == "true")
 
         form = QFormLayout()
         form.addRow("Start port", self.start_port)
@@ -216,6 +220,7 @@ class MainWindow(QMainWindow):
         form.addRow(self.stacking)
         form.addRow(self.no_splits)
         form.addRow(self.highlight)
+        form.addRow(self.crane_orders)
         self.plan_summary = QLabel()
         self.plan_summary.setWordWrap(True)
         replan_button = QPushButton("Replan from here")
@@ -256,7 +261,7 @@ class MainWindow(QMainWindow):
                                (self.max_weight, "valueChanged"), (self.max_items, "valueChanged"),
                                (self.max_stops, "valueChanged"), (self.use_hold, "toggled"),
                                (self.stacking, "toggled"), (self.no_splits, "toggled"),
-                               (self.highlight, "toggled")):
+                               (self.highlight, "toggled"), (self.crane_orders, "toggled")):
             getattr(widget, signal).connect(lambda *_: self.replan_timer.start())
 
         panel = QWidget()
@@ -438,24 +443,27 @@ class MainWindow(QMainWindow):
         self._fill(self.contracts, rows)
 
     def _write_highlights(self, plan):
-        """Tells the mod which cargo to highlight at the port the player is in: what to load, and, marked
-        with a U, what still has to come off the boat."""
+        """Tells the mods which cargo to move at the port the player is in: what to load, and, marked
+        with a U, what still has to come off the boat. highlight.txt is shown in the game's windows and
+        crane_orders.txt is worked by the crane operator; each is left empty while its box is off."""
         wanted = []
         first = plan.stops[0] if plan.stops else None
-        if self.highlight.isChecked() and first and first.port == self.snap.docked_port():
+        if first and first.port == self.snap.docked_port():
             wanted = [i.guid for i in first.load] + [i.guid for i, _ in first.stage]
             wanted += [f"{i.guid} U" for i in first.unload + first.drop]
             for _, stored in completing_unloads(self.snap, first):  # the stored part of a contract being finished
                 wanted += [i.guid for i in stored]
-        if self.highlight.isChecked():  # cargo to take out to finish a contract, wherever the boat is docked
-            for mission in self.snap.completable_at(self.snap.docked_port()):
-                wanted += [i.guid for i in mission.to_take_out]
-        target = Path(self.path).with_name("highlight.txt")
-        try:
-            if target.parent.is_dir():
-                target.write_text("".join(guid + "\n" for guid in wanted), encoding="ascii")
-        except OSError:
-            pass  # highlighting is a nicety; the plan on screen is still right
+        # cargo to take out to finish a contract, wherever the boat is docked
+        for mission in self.snap.completable_at(self.snap.docked_port()):
+            wanted += [i.guid for i in mission.to_take_out]
+        for name, on in (("highlight.txt", self.highlight.isChecked()),
+                         ("crane_orders.txt", self.crane_orders.isChecked())):
+            target = Path(self.path).with_name(name)
+            try:
+                if target.parent.is_dir():
+                    target.write_text("".join(guid + "\n" for guid in wanted) if on else "", encoding="ascii")
+            except OSError:
+                pass  # a nicety; the plan on screen is still right
 
     def _fill_aboard(self):
         snap, rows = self.snap, []
@@ -508,6 +516,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("stacking", "true" if self.stacking.isChecked() else "false")
         self.settings.setValue("noSplits", "true" if self.no_splits.isChecked() else "false")
         self.settings.setValue("highlight", "true" if self.highlight.isChecked() else "false")
+        self.settings.setValue("craneOrders", "true" if self.crane_orders.isChecked() else "false")
         self.plan_tree.clear()
         snap = self.snap
         start = self.start_port.currentData() or snap.here()

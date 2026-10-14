@@ -72,6 +72,10 @@ two "Ships At Sea Logistics" shortcuts if you created them.
   off at this port gets a floating "UNLOAD" marker, like the game's own markers for a tracked
   mission, so it can be picked out from the crane.
 
+With [SasCraneOperator](https://github.com/foxyv/SasCraneOperator), the planner's **Send orders to the
+crane operator** box has the boat's crane operator load and unload this port's cargo as planned. It
+is separate from highlighting: either can be on without the other.
+
 The mod reads game state, restyles inventory slots and places its own markers over cargo. It never
 changes cargo, contracts, money or anything else the game saves.
 
