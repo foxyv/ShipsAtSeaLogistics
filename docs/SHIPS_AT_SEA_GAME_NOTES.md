@@ -336,6 +336,12 @@ Source: dump, probe, playtest.
   force is weak enough that the push of people on the low side holds it there: the class 3 service
   vessel held 17° at 26 knots with six people aboard (about 600 kg on 131,800 kg) and levelled within
   five seconds of the push being switched off. Setting the value to 0 on every character fixes it.
+- **The wake** (fixed by SasBoatFixes): the water is NVIDIA WaveWorks, and wakes come from its
+  local waves simulation over a square of water centred on
+  `WaveWorksComponent.LocalWavesSimulationSettings.SimulationDomainCenter` (X, Y). The game moves
+  that centre with the boat only while someone is at the helm (`boat.DriverComponent.Driver`), so a
+  boat left under way sails out of the square and its wake vanishes. Setting the centre to the boat's
+  position ten times a second keeps the wake, at its normal size and look.
 
 ### Taxis
 
