@@ -398,6 +398,22 @@ local function ExportBoats()
     return list
 end
 
+-- Every dock cargo area with its port and position, empty or not: a boat lying at a port's far dock
+-- (the large-cargo docks, say) can be far from the port's own position but is beside one of these.
+local function ExportDocks()
+    local list = Arr()
+    for _, area in ipairs(FindAllOf("CargoArea") or {}) do
+        local full = FullName(area)
+        if full and not full:find("Default__", 1, true) and not (ClassName(area) or ""):find("BoatCargoArea", 1, true) then
+            local port = ShortName(Try(function() return area.Port end, "dock port"))
+            if port then
+                list[#list + 1] = { port = port, class = ClassName(area), location = ActorLocation(area) }
+            end
+        end
+    end
+    return list
+end
+
 local function ExportPlayer()
     local controller = FindFirstOf("PlayerController")
     if not IsObject(controller) then return nil end
@@ -415,7 +431,7 @@ local function Export(reason)
     end, "cell size")
     for name, section in pairs({
         missions = ExportMissions, containers = ExportContainers, ports = ExportPorts,
-        boats = ExportBoats, player = ExportPlayer,
+        boats = ExportBoats, player = ExportPlayer, docks = ExportDocks,
     }) do
         snapshot[name] = Try(section, name)
     end

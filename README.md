@@ -80,7 +80,8 @@ changes cargo, contracts, money or anything else the game saves.
 - A route is planned once and then followed: work done at the current stop is ticked off and the
   route advances when the boat docks at the next stop. It is replanned on request, when a setting
   changes, when it is finished, or when the boat docks at a port it does not visit.
-- The boat counts as docked within 300 m of a port and as in transit otherwise. In transit the
+- The boat counts as docked within 120 m of one of a port's dock cargo areas, or within 300 m of the
+  port itself, and as in transit otherwise. In transit the
   start port reads "In transit", nothing switches to whichever port happens to be nearest, and a
   plan made then starts from the boat's own position.
 - A contract whose cargo is all in its destination's warehouse is shown as ready to complete, with

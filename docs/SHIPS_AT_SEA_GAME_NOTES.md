@@ -110,7 +110,9 @@ Source: dump, probe.
 
 - **Units:** centimetres. World **X points north, Y east**, Z up.
 - **Ports:** `Port` objects; `PortSubsystem:GetPortLocation(port)` gives each one's position.
-  Neighbouring ports can be as little as 0.5 km apart.
+  Neighbouring ports can be as little as 0.5 km apart, and a port's far docks can be further from its
+  own position than that: Røst's large-cargo dock is 348 m from Røst and 289 m from Kveldsbeita.
+  Each `CargoArea` names its `Port`, so the dock areas are the better guide to which port a boat is at.
 - **Water depth:** `EnvironmentSubsystem:GetWaterDepth({X, Y, Z})` returns centimetres, positive over
   water and negative on land, in about 5 µs a call. `GetMinWaterDepthForBoats()` is **500 cm**.
 - **The map in numbers** (ours): a depth grid at 50 m covering every port plus 2 km is 665 × 547
@@ -295,6 +297,13 @@ Source: probe, playtest.
 - **Free spots** are best found from `CellsOccupancyMap` directly, as boxes of cells per item, keeping
   the piece's own rotation and its anchor (the offset of `GridTransform.position` from its lowest cell).
 - **The warehouse puts cargo out** in whichever dock area it chooses, which can be far from the boat.
+- **Collision while lifting and lowering:** drawing a carried piece's `SolidCollision` box in by
+  10 cm did not stop it catching on its neighbours; `SetActorEnableCollision(false)` while it is lifted
+  out and lowered in did. Switch it back on the moment the piece comes off the hook, or it falls
+  through the dock.
+- **Moving a joint goal straight to a new pose** moves all the joints at once at their own speeds, and
+  the arm sags far below both poses on the way. Short steps, each a pose at the height wanted, keep it
+  up.
 - **Area sizes:** the class 3 ship's dock areas refused large containers in `BP_CargoSpawnArea_C` and
   `BP_CargoMissionSpawnArea_Light_C`; `BP_CargoMissionSpawnArea_Heavy_C` took them.
 

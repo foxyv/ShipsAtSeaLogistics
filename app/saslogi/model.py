@@ -22,6 +22,7 @@ ID_TAG = "Mission.Descriptor.MissionID"
 CARGO_SIZES = ["XS", "S", "M", "L", "XL", "XXL"]
 CM_PER_KM = 100_000.0
 DOCKED_KM = 0.3  # a boat this close to a port counts as being in it; neighbouring ports are 0.5 km apart
+DOCK_AREA_KM = 0.12  # or this close to one of a port's dock cargo areas, wherever the port's own position is
 
 
 @dataclass
@@ -122,6 +123,7 @@ class HoldItem:
 class Snapshot:
     time: str = ""
     ports: dict[str, Port] = field(default_factory=dict)
+    docks: list = field(default_factory=list)  # (port id, location) of every dock cargo area
     missions: list[Mission] = field(default_factory=list)
     items: list[CargoItem] = field(default_factory=list)
     boats: list[Boat] = field(default_factory=list)
@@ -187,9 +189,21 @@ class Snapshot:
         return self.nearest_port(self.boat_location())
 
     def docked_port(self) -> str | None:
-        """The port the boat is actually in, or None while it is out at sea."""
-        port, here = self.current_port(), self.boat_location()
-        if port is None or here is None:
+        """The port the boat is actually in, or None while it is out at sea.
+
+        Beside one of a port's dock cargo areas counts first: a port's far docks (the large-cargo
+        ones) can be further from the port's own position than a neighbouring port is.
+        """
+        here = self.boat_location()
+        if here is None:
+            return None
+        near = [(math.dist(loc[:2], here[:2]), port) for port, loc in self.docks if loc and port in self.ports]
+        if near:
+            distance, port = min(near)
+            if distance / CM_PER_KM <= DOCK_AREA_KM:
+                return port
+        port = self.current_port()
+        if port is None:
             return None
         return port if math.dist(self.ports[port].location[:2], here[:2]) / CM_PER_KM <= DOCKED_KM else None
 
@@ -232,6 +246,9 @@ def parse_snapshot(data: dict) -> Snapshot:
         if raw.get("id"):
             snap.ports[raw["id"]] = Port(raw["id"], raw.get("name") or raw["id"], _vec(raw.get("location")))
     snap.player_location = _vec((data.get("player") or {}).get("location"))
+    for raw in data.get("docks") or []:
+        if raw.get("port") and raw.get("location"):
+            snap.docks.append((raw["port"], _vec(raw["location"])))
     for raw in data.get("boats") or []:
         snap.boats.append(Boat(raw.get("boatName") or raw.get("class") or "Boat", bool(raw.get("owned")),
                                _vec(raw.get("location")), raw.get("payload"), raw.get("path", "")))
