@@ -604,13 +604,13 @@ local function TintSlot(slot, guid)
     end
 end
 
-local function OnSlotFilled(context, data)
+-- Only the slot itself is touched here. The function's own parameter is left alone: what it points
+-- at is not certain to be a live object, and reading a dead one crashes the game outside pcall's reach.
+local function OnSlotFilled(context)
     pcall(function()
         if next(Wanted) == nil and not Touched then return end
         local slot = context:get()
-        local guid = nil
-        pcall(function() guid = GuidStr(data:get().Item.Guid) end)
-        TintSlot(slot, guid)
+        TintSlot(slot, nil)
         Pending[#Pending + 1] = slot
     end)
 end
