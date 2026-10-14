@@ -91,6 +91,13 @@ Source: playtest, unless noted.
 - **What survives Ctrl+R:** objects a mod created in the world (crew groups, markers) stay, while the
   mod's Lua state is gone. Recognise your own objects by their data (a group name, a marker title),
   not by a Lua table, and clean up strays on load.
+- **A chunk may have at most 200 locals.** A long script that passes it fails to load ("too many
+  local variables (limit is 200) in main function"). Keep settings in a table or as globals of the
+  mod's own Lua state.
+- **Line traces work:** `Default__KismetSystemLibrary:LineTraceSingle(worldContext, start, end, 0,
+  false, { actorsToIgnore }, 0, hit, true, colour, colour, 0.0)` returns whether it hit, with the
+  hit in `hit.OutHit or hit` (`ImpactPoint`, `Location`). The bundled `LineTraceMod` shows the
+  same call.
 - **Errors inside `pcall` vanish.** Log the error of any call that matters; a missing toast went
   unexplained until we did.
 - **Tooling on this machine:** there is no Lua compiler to syntax-check, so load errors only show in
@@ -263,7 +270,15 @@ Source: probe (two surveys on the Norland), playtest.
   `OnCargoAttached_Base`, `Lift Hook`, `OnCargoAttached`; and `OnCargoDetached_Base`, `CustomEvent`,
   `Lift Hook`, `OnCargoDetached`. `AttachedCargo` is set only after `ServerAttachCargo` returns.
 - **Swinging:** with the swivel stopping at half a turn and a heavy load on a cable, lift the arm in
-  place first and swing at height; folding the arm in to swing pulls the load against the crane.
+  place first, draw the telescope in, swing, then run it out again: that clears the ship's
+  superstructure. Folding the whole arm in to swing pulls the load against the crane.
+- **Placing:** the arm model also puts the hook a little to one side. Lining the load up by measuring
+  where its `CargoHook` is against where it should be, and moving the arm by the difference until it
+  is within a few centimetres, lets it drop cleanly between neighbours. Lifting the first stretch
+  off a stack with the arm, not the cable, keeps it from dragging on the piece below.
+- **Docking:** the Norland is often too big to dock where its cargo goes. Lying still with its
+  engines off (`BoatEngine:IsEngineRunning()` false for every engine on the boat) is a usable test
+  for "alongside and stopped".
 - **Two cranes, one piece:** when neither crane reaches both where a piece is and where it goes, one
   can set it down in the hold where the other reaches it. Only one crane lifts at a time.
 - **Its blueprint** holds `HookPhysicsConstraint`, `HookCable`, `HookAttachCollider` and a 90 kg
