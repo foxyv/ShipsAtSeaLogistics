@@ -75,6 +75,8 @@ two "Ships At Sea Logistics" shortcuts if you created them.
 With [SasCraneOperator](https://github.com/foxyv/SasCraneOperator), the planner's **Send orders to the
 crane operator** box has the boat's crane operator load and unload this port's cargo as planned. It
 is separate from highlighting: either can be on without the other.
+Cargo the route only "leaves in the warehouse" (not delivered at this port, put off at the stop
+nearest its destination) is highlighted but not sent to the operator.
 
 The mod reads game state, restyles inventory slots and places its own markers over cargo. It never
 changes cargo, contracts, money or anything else the game saves.

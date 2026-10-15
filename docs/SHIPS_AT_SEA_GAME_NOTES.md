@@ -288,6 +288,17 @@ Source: probe (two surveys on the Norland), playtest.
 
 ### Placing cargo
 
+- **The cargo area grid** is 25 cm cells. The class 3 ship's hold is 12 x 12 x 4 cells. Large
+  containers and pallets are 4 x 4 x 4 cells and fill the hold's full height, so a hold of them can
+  look full while there is plenty of room if flat pieces (4 x 2 x 1) are stacked onto each other and
+  the rest slid together. Clearing a single spot by moving what is in it onto the floor is not enough;
+  the planner has to search (greedy, then drop moves that are not needed).
+- **`ServerDetachCargo(area, position, rotation)`** puts the piece at that grid place in that area,
+  wherever the area is: a piece released over an area a long way off appears there. The mod only sets a
+  piece down where its crane really reaches.
+- **The stationary dock crane (T01)** runs its boom out to about 8.6 m from its base; asked for a
+  point further out it stops short and the game then pulls the piece to the hook.
+
 Source: probe, playtest.
 
 - **`FindPlaceForInventoryItemInGrid` ignores where it is asked to look** with `PositionRule = 1`
@@ -336,6 +347,14 @@ Source: dump, probe, playtest.
   force is weak enough that the push of people on the low side holds it there: the class 3 service
   vessel held 17° at 26 knots with six people aboard (about 600 kg on 131,800 kg) and levelled within
   five seconds of the push being switched off. Setting the value to 0 on every character fixes it.
+- **Invert mouse in a crane** (fixed by SasBoatFixes): the game applies the settings
+  `bInvertMouseX/Y` through enhanced input modifiers, `LAB132InputModifierMouseInversion` and
+  `...MouseSensitivity` (and `...ControllerInversion/Sensitivity` for sticks), set on the
+  `IA_CharacterLook` binding of `IMC_Character`, `IMC_BoatFirstPerson`, `IMC_Boat` and `IMC_WaterCannon`.
+  `IMC_CraneContext` has `IA_CharacterLook` on `Mouse2D` and `Gamepad_Right2D` with no modifiers, so
+  the settings do nothing in a crane's camera. An input context's bindings are in
+  `DefaultKeyMappings.Mappings` (the plain `Mappings` array is empty). A modifier object can be
+  appended to a binding's `Modifiers` at runtime and is shared; it keeps no state.
 - **The wake** (fixed by SasBoatFixes): the water is NVIDIA WaveWorks, and wakes come from its
   local waves simulation over a square of water centred on
   `WaveWorksComponent.LocalWavesSimulationSettings.SimulationDomainCenter` (X, Y). The game moves

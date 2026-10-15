@@ -445,23 +445,29 @@ class MainWindow(QMainWindow):
     def _write_highlights(self, plan):
         """Tells the mods which cargo to move at the port the player is in: what to load, and, marked
         with a U, what still has to come off the boat. highlight.txt is shown in the game's windows and
-        crane_orders.txt is worked by the crane operator; each is left empty while its box is off."""
-        wanted = []
+        crane_orders.txt is worked by the crane operator; each is left empty while its box is off.
+        Cargo the route only leaves in the warehouse (not delivered here, put off at the nearest stop)
+        is highlighted but not sent to the operator: it is not what the boat is here to do."""
+        wanted, orders = [], []
         first = plan.stops[0] if plan.stops else None
         if first and first.port == self.snap.docked_port():
             wanted = [i.guid for i in first.load] + [i.guid for i, _ in first.stage]
-            wanted += [f"{i.guid} U" for i in first.unload + first.drop]
+            wanted += [f"{i.guid} U" for i in first.unload]
+            orders = list(wanted)
+            wanted += [f"{i.guid} U" for i in first.drop]
             for _, stored in completing_unloads(self.snap, first):  # the stored part of a contract being finished
                 wanted += [i.guid for i in stored]
+                orders += [i.guid for i in stored]
         # cargo to take out to finish a contract, wherever the boat is docked
         for mission in self.snap.completable_at(self.snap.docked_port()):
             wanted += [i.guid for i in mission.to_take_out]
-        for name, on in (("highlight.txt", self.highlight.isChecked()),
-                         ("crane_orders.txt", self.crane_orders.isChecked())):
+            orders += [i.guid for i in mission.to_take_out]
+        for name, on, guids in (("highlight.txt", self.highlight.isChecked(), wanted),
+                                ("crane_orders.txt", self.crane_orders.isChecked(), orders)):
             target = Path(self.path).with_name(name)
             try:
                 if target.parent.is_dir():
-                    target.write_text("".join(guid + "\n" for guid in wanted) if on else "", encoding="ascii")
+                    target.write_text("".join(guid + "\n" for guid in guids) if on else "", encoding="ascii")
             except OSError:
                 pass  # a nicety; the plan on screen is still right
 
