@@ -14,9 +14,6 @@ not Ctrl+R. Keep the debug logging in until these are done.
 - [ ] **Why a crane was chosen.** Whenever he picks a crane other than the one he is in, the log has
   `choosing <crane> for the <cargo>: ...`, saying which cranes can reach both places and the
   distances. Check the reasons look right.
-- [ ] **Shift+F5 switches the hover hint off and on.** A toast says which; the setting survives a
-  restart (`hint_off.txt` in the mod folder); F5 still marks with the hint off. Check that Shift+F5
-  does not *also* mark or unmark the piece you are looking at.
 - [ ] **Crane sounds while the operator works.** The motors should be heard as the crane swings,
   luffs, runs out and winds the cable, and go quiet when it stops. The log has one `crane sounds:`
   line saying whether the game's sound functions could be called.
@@ -46,6 +43,6 @@ not Ctrl+R. Keep the debug logging in until these are done.
 
 ## Done
 
-Confirmed in play, kept here for reference: the invert mouse setting in a crane's camera (both
-settings); the crane's motor sounds; the wake keeps going when you leave the helm; parking
+Confirmed in play, kept here for reference: Shift+F5 switching the hover hint off and on; the
+invert mouse setting in a crane's camera (both settings); the crane's motor sounds; the wake keeps going when you leave the helm; parking
 along one route and smooth motion between steps; Røst's large-cargo dock recognised as Røst.
