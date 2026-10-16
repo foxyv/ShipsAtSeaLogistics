@@ -381,6 +381,15 @@ The Sørvågen taxi itself listed no destinations.
 
 Source: dump, probe, playtest.
 
+- **A crew member whose slot does not exist when a save loads** (seen with SasCraneOperator's added
+  Crane Operator position, which is built about 25 seconds after the boat appears): the game leaves
+  them with their saved `BoatKey` and `CrewSlotId`, but `Boat` unset, no `CrewSlot`, and not in the
+  boat's `CrewMembers`. `IsAssignedToBoat()` still says true, the crew chart shows them nowhere, and
+  assigning them to the boat again by hand mends it. Setting `member.Boat`, adding them to the boat
+  component's `CrewMembers` and calling `OnRep_CrewMembers` / `OnRep_Boat` does the same. A boat's key
+  is `boat:GetBoatKey().ID`; a crew member's is `member.BoatKey.ID`. All hired crew are in
+  `SasCompanyCrewComponent.CrewMembers`.
+
 - **Layout on a boat with crew** (`SasBoatCrewComponent` on the boat):
   - `CrewMembers` (`SasCrewMember`, created in `/Engine/Transient`), `CrewTaskCategories`,
     `CrewTasksDefinitions`.
