@@ -14,9 +14,6 @@ not Ctrl+R. Keep the debug logging in until these are done.
 - [ ] **Why a crane was chosen.** Whenever he picks a crane other than the one he is in, the log has
   `choosing <crane> for the <cargo>: ...`, saying which cranes can reach both places and the
   distances. Check the reasons look right.
-- [ ] **Crane sounds while the operator works.** The motors should be heard as the crane swings,
-  luffs, runs out and winds the cable, and go quiet when it stops. The log has one `crane sounds:`
-  line saying whether the game's sound functions could be called.
 - [ ] **A piece teleporting into the hold on release.** Every drop now writes a `DROP:` line (where
   the piece was when let go, where the hook was, where it was sent, and how far apart those are) and
   a `DROP+:` line a second later (where it ended up, and how far it moved since release). A jump of
@@ -28,6 +25,15 @@ not Ctrl+R. Keep the debug logging in until these are done.
   Dr. Phil hold from the log (12x12x4, 11 pieces): 3 moves for the first piece, 6 for a second.
   In play, check each move is possible for the crane, and that he does not shuffle the same
   pieces back and forth afterwards.
+- [ ] **Hook over the crate before it comes down.** The log has an `AIM:` line per pick saying how
+  far the hook was from the piece's lifting point after how many corrections. A crate that was
+  grabbed half a metre to the side should now be taken squarely.
+- [ ] **Dock crane reach.** A piece to load further out than the dock crane's boom (about 8.6 m) is
+  first brought to the nearer dock area (`bringing the ... first: it is out of the crane's reach`),
+  not pulled to the hook.
+- [ ] **Nothing put ashore out of reach, and the dock crane needs the boat docked.** Shutting down
+  an engine 120 m off a port must not unload anything; the toast says the dock is out of the crane's
+  reach. The class 1 and 2 boats' dock crane works only with the boat made fast.
 - [ ] **Caught on something.** If a load snags on the way, the crane lifts a metre and carries on, a
   few times at most (`caught on something` in the log).
 - [ ] **Steadier hook for the player.** Driving a crane yourself, a load that comes off the hook within
@@ -43,6 +49,7 @@ not Ctrl+R. Keep the debug logging in until these are done.
 
 ## Done
 
-Confirmed in play, kept here for reference: Shift+F5 switching the hover hint off and on; the
+Confirmed in play, kept here for reference: the operator put back on the boat and in the position
+after a load (`putting them back on the boat` in the log); Shift+F5 switching the hover hint off and on; the
 invert mouse setting in a crane's camera (both settings); the crane's motor sounds; the wake keeps going when you leave the helm; parking
 along one route and smooth motion between steps; Røst's large-cargo dock recognised as Røst.
