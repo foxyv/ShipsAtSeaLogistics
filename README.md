@@ -52,7 +52,7 @@ pass it the game folder: `.\deploy.ps1 -GameDir "X:\SteamLibrary\steamapps\commo
 
 1. Start the game and load your save. The mod loads with the game.
 2. Press **F8** in game. The planner picks the snapshot up within a few seconds.
-3. Press **F7** to keep it updated every 20 seconds while you play.
+3. It is then kept up to date every 20 seconds while you play (**F7** turns that off and on).
 
 The planner looks for the snapshot in every Steam library on the machine. If it says "No snapshot
 yet", use the **Snapshot file…** button to point it at
@@ -66,7 +66,7 @@ two "Ships At Sea Logistics" shortcuts if you created them.
 ## Keys in game
 
 - **F8** writes a snapshot now.
-- **F7** toggles writing one every 20 seconds. It is off after each game start.
+- **F7** toggles writing one every 20 seconds. It is on after each game start.
 - **F6** toggles highlighting. In the warehouse window and the crane's cargo list, cargo to load is
   tinted green and cargo to unload orange. In the world, each piece of cargo in the hold that comes
   off at this port gets a floating "UNLOAD" marker, like the game's own markers for a tracked
@@ -75,8 +75,40 @@ two "Ships At Sea Logistics" shortcuts if you created them.
 With [SasCraneOperator](https://github.com/foxyv/SasCraneOperator), the planner's **Send orders to the
 crane operator** box has the boat's crane operator load and unload this port's cargo as planned. It
 is separate from highlighting: either can be on without the other.
+**Pieces marked delivered but not at their destination.** The game keeps a piece marked delivered once it
+has reached its destination, even if it is then taken out again (out of the warehouse, say) and carried
+off. A piece found anywhere but its destination is planned as cargo still to deliver, and the route
+summary says which. A piece that is nowhere (consumed on delivery) stays delivered. A delivered piece
+that is still in the hold of a contract that is over takes its room all the same, so the planner counts
+the cells as blocked, and the route summary names it.
+
+**Planning runs in the background.** A route can take several seconds to work out, so it is planned on a
+thread of its own: the window stays usable, shows a busy bar, and greys out the plan on screen until the
+new one is ready. A setting changed meanwhile plans once more with the latest settings.
+
+**Weighted score.** Besides the three fixed priorities, "Weighted score" ranks plans by six adjustable
+weights (with presets): contracts completed, money (NOK per km), hold usage, empty legs, stranded cargo
+and deadlines. Each term is put on a 0..1 scale against the whole open job, so a weight of 1 means about
+the same importance for each. Empty legs, stranded cargo and lateness are penalties. A contract that
+would arrive after its deadline is lost (it earns nothing), and urgent cargo is loaded first whichever
+priority is chosen. The deadlines come from the contracts' calendar-wait step, exported by the mod with
+the game clock; the sailing time follows the boat's speed and how fast the game clock runs. The code is
+`app/saslogi/scoring.py`, and `python -m pytest app/tests` covers it.
+
+If the crane operator finds a piece it cannot fit into the hold even after rearranging (it writes
+`loadfail.txt` next to the snapshot), the planner leaves that piece out of the route and plans again,
+and says how many it left out. The report is cleared when the hold changes, and the piece is planned
+for again.
+
+When the planner chooses what to load at a stop it adds a contract's pieces biggest first (widest on
+the floor, then tallest) so that the small ones fill the gaps. `app/tests/sim_loading.py` simulates
+loading a hold with the real cargo footprints, and compares the planner's promise with how the crane
+operator places; `python tests/sim_loading.py orders` prints the figures.
+
 Cargo the route only "leaves in the warehouse" (not delivered at this port, put off at the stop
-nearest its destination) is highlighted but not sent to the operator.
+nearest its destination) is neither marked in the game nor ordered: a mark means the operator will move
+that piece. It is listed in `removable.txt` instead, and the crane operator takes such cargo off the boat
+only when she cannot make room for a load by rearranging, the biggest piece first and no more than needed.
 
 The mod reads game state, restyles inventory slots and places its own markers over cargo. It never
 changes cargo, contracts, money or anything else the game saves.
@@ -138,8 +170,22 @@ https://github.com/foxyv/SasBoatFixes
 .\deploy.ps1              # copy the mod into the game
 .\run.ps1                 # start the planner
 .\package.ps1 v0.1.0      # build the release zip into dist\
+python tools/check_lua.py # check the mod's Lua
 cd app; py -m unittest discover tests
 ```
+
+Besides the planner's own tests, `app/tests/test_file_contracts.py` checks the files the planner shares with
+the mods (`crane_orders.txt`, `highlight.txt`, `loadfail.txt`) against sample files kept identical in the
+SasCraneOperator repository, and runs the planner and the operator mod together when the two repositories
+are side by side. `app/tests/lua_harness.py` loads the Logistics mod's script in Python, against a stand-in for
+UE4SS, for this. `pip install -r app/requirements-dev.txt` installs what the tests need, and the same checks
+run on GitHub on every push (`.github/workflows/ci.yml`).
+
+`tools/check_lua.py` runs [luacheck](https://github.com/lunarmodules/luacheck/releases) over the mod (put
+`luacheck.exe` in `..\.tools\luacheck\`, or set `LUACHECK`; settings are in `.luacheckrc`), a syntax check
+(`pip install lupa`) and a count of the file's top-level locals, since Lua allows only 200. luacheck catches
+a function that calls a name defined further down the file, which the game only shows as a feature that
+silently fails.
 
 Ctrl+R in game reloads UE4SS Lua mods without a restart, if `EnableHotReloadSystem = 1` is set in
 `ue4ss\UE4SS-settings.ini`.

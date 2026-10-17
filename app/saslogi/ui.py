@@ -2,28 +2,31 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
+import sys
 from collections import Counter, defaultdict
 import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
-    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QProgressBar, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from . import searoutes
 from .mapview import MapView
-from .model import AT_SEA, BOAT, Snapshot, load_snapshot
+from .model import BOAT, Snapshot, load_snapshot, read_no_room
 from .packing import Hold
 from .planner import (
     PRIORITIES, Capacity, advance, check_load, completing_unloads, has_work, make_plan, remaining,
     waiting_by_contract,
 )
+from .scoring import PRESETS, Weights
 
 # With auto export on the mod writes a snapshot every 20 seconds. Three missed in a row means it is
 # off, which is the case after every game start, or the game is not running.
@@ -100,13 +103,31 @@ def summarise(items, width: int = 70) -> str:
     return "\n".join(lines)
 
 
+class PlanRunner(QObject):
+    """Plans a route on a thread of its own. `finished` is emitted back on the window's thread with the
+    plan, or with the error that stopped the search."""
+
+    finished = Signal(object, object)
+
+    def run(self, job):
+        def work():
+            try:
+                plan = make_plan(job["snap"], job["start"], job["capacity"], job["priority"], job["max_stops"],
+                                 no_room=job["no_room"], weights=job["weights"])
+                self.finished.emit(plan, None)
+            except Exception as error:  # shown in the window; the search must not take the program down
+                self.finished.emit(None, error)
+
+        threading.Thread(target=work, name="route planner", daemon=True).start()
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, settings: QSettings | None = None, path: str | None = None):
         super().__init__()
         self.setWindowTitle("Ships At Sea Logistics")
         self.resize(1150, 720)
-        self.settings = QSettings("SasLogistics", "Planner")
-        self.path = self.settings.value("snapshotPath", default_snapshot_path())
+        self.settings = settings or QSettings("SasLogistics", "Planner")  # tests pass settings of their own
+        self.path = path or self.settings.value("snapshotPath", default_snapshot_path())
         self.snap = Snapshot()
         self.mtime = None
         self.sea_km: dict = {}  # (port, port) -> km by sea; empty until sea routes are known
@@ -114,6 +135,13 @@ class MainWindow(QMainWindow):
         self.sea_source = None  # what the routes in use were worked out from: (depth grid mtime, port positions)
         self.sea_job = None  # a background route calculation in progress
         self.sea_note = "Distances are straight lines between ports."
+        self.no_room = frozenset()  # cargo the crane operator reports does not fit the hold
+        self.planning = False  # a route is being worked out on the planner thread
+        self.plan_again = False  # something changed meanwhile, so plan again when it finishes
+        self.plan_job = None
+        self.runner = PlanRunner()
+        self.runner.finished.connect(self._planned)
+        sys.setswitchinterval(0.002)  # a busy planner thread must not make the window sluggish
         self.committed = None  # the plan being followed; it is kept until something calls for a new one
         self.committed_at = ""
         self.known_cargo: set[str] = set()  # cargo that existed when that plan was made
@@ -181,12 +209,57 @@ class MainWindow(QMainWindow):
         table.horizontalHeader().setStretchLastSection(True)
         return table
 
+    WEIGHT_LABELS = {
+        "contracts": ("Contracts completed", "Whole contracts delivered on time."),
+        "money": ("Money (NOK per km)", "What the route earns, less what sailing costs."),
+        "fill": ("Hold usage", "How full the hold is on the legs sailed."),
+        "empty": ("Empty legs (a penalty)", "The share of the distance sailed with nothing aboard."),
+        "stranded": ("Stranded cargo (a penalty)", "Cargo the route leaves behind."),
+        "late": ("Deadlines (a penalty, top priority)", "Contracts that would arrive after their deadline. "
+                                                          "Keep this the largest weight."),
+    }
+
+    def _weights_controls(self):
+        """The weights of the weighted score, with presets; shown only when that priority is chosen."""
+        self.weights_box = QWidget()
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        self.weight_preset = QComboBox()
+        self.weight_preset.addItem("Custom", None)
+        for name in PRESETS:
+            self.weight_preset.addItem(name.capitalize(), name)
+        form.addRow("Weights", self.weight_preset)
+        self.weight_spins = {}
+        start = Weights()
+        for key, (label, tip) in self.WEIGHT_LABELS.items():
+            box = QDoubleSpinBox(minimum=0.0, maximum=100.0, decimals=1, singleStep=0.5)
+            box.setToolTip(tip)
+            box.setValue(float(self.settings.value(f"weight_{key}", getattr(start, key))))
+            self.weight_spins[key] = box
+            form.addRow(label, box)
+        self.weights_box.setLayout(form)
+        self.weight_preset.currentIndexChanged.connect(self._apply_weight_preset)
+
+    def _apply_weight_preset(self):
+        preset = PRESETS.get(self.weight_preset.currentData() or "")
+        if not preset:
+            return
+        for key, value in preset.as_dict().items():
+            self.weight_spins[key].setValue(value)  # each change replans, after a moment
+
+    def _show_weights(self):
+        self.weights_box.setVisible(self.priority.currentData() == "custom")
+
+    def weights(self) -> Weights:
+        return Weights(**{key: box.value() for key, box in self.weight_spins.items()})
+
     def _route_tab(self) -> QWidget:
         self.start_port = QComboBox()
         self.priority = QComboBox()
         for key, label in PRIORITIES.items():
             self.priority.addItem(label, key)
         self.priority.setCurrentIndex(max(0, self.priority.findData(self.settings.value("priority", "full"))))
+        self._weights_controls()
         self.max_weight = QDoubleSpinBox(maximum=1_000_000, decimals=0, singleStep=100, suffix=" kg", specialValueText="No limit")
         self.max_weight.setValue(float(self.settings.value("maxWeight", 0)))
         self.max_items = QSpinBox(maximum=10_000, specialValueText="No limit")
@@ -213,6 +286,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         form.addRow("Start port", self.start_port)
         form.addRow("Prioritise", self.priority)
+        form.addRow(self.weights_box)
         form.addRow("Boat weight limit", self.max_weight)
         form.addRow("Boat item limit", self.max_items)
         form.addRow("Stops to plan", self.max_stops)
@@ -263,13 +337,30 @@ class MainWindow(QMainWindow):
                                (self.stacking, "toggled"), (self.no_splits, "toggled"),
                                (self.highlight, "toggled"), (self.crane_orders, "toggled")):
             getattr(widget, signal).connect(lambda *_: self.replan_timer.start())
+        for box in self.weight_spins.values():
+            box.valueChanged.connect(lambda *_: self.replan_timer.start())
+        self.priority.currentIndexChanged.connect(self._show_weights)
+        self._show_weights()
 
         panel = QWidget()
         panel.setLayout(side)
         panel.setFixedWidth(330)
         layout = QHBoxLayout()
+        self.busy = QWidget()
+        busy_layout = QHBoxLayout()
+        busy_layout.setContentsMargins(0, 0, 0, 0)
+        busy_layout.addWidget(QLabel("Calculating the route…"))
+        bar = QProgressBar()
+        bar.setRange(0, 0)  # no known end: it just moves
+        bar.setTextVisible(False)
+        busy_layout.addWidget(bar, 1)
+        self.busy.setLayout(busy_layout)
+        self.busy.hide()
+        right = QVBoxLayout()
+        right.addWidget(self.busy)
+        right.addWidget(self.plan_tree, 1)
         layout.addWidget(panel)
-        layout.addWidget(self.plan_tree, 1)
+        layout.addLayout(right, 1)
         tab = QWidget()
         tab.setLayout(layout)
         return tab
@@ -369,6 +460,13 @@ class MainWindow(QMainWindow):
 
     def poll(self):
         self.update_sea_routes()
+        # Cargo the crane operator could not fit into the hold: plan without it, and plan again when
+        # that changes (it is cleared once the hold has changed and the pieces may fit).
+        reported = read_no_room(self.path)
+        if reported != self.no_room:
+            self.no_room = reported
+            if self.committed is not None:
+                self.replan_timer.start()
         try:
             mtime = os.path.getmtime(self.path)
         except OSError:
@@ -446,15 +544,18 @@ class MainWindow(QMainWindow):
         """Tells the mods which cargo to move at the port the player is in: what to load, and, marked
         with a U, what still has to come off the boat. highlight.txt is shown in the game's windows and
         crane_orders.txt is worked by the crane operator; each is left empty while its box is off.
-        Cargo the route only leaves in the warehouse (not delivered here, put off at the nearest stop)
-        is highlighted but not sent to the operator: it is not what the boat is here to do."""
-        wanted, orders = [], []
+        Cargo the route only leaves in the warehouse (not delivered here, put off at the nearest stop), and
+        delivered pieces left in the hold, are neither marked nor ordered: a mark in the game means the
+        operator will move that piece, so a piece she will not move must not carry one. The ones the route
+        leaves are listed in removable.txt instead, for the operator to take off only if she needs the room
+        for a load. The route summary lists them."""
+        wanted, orders, removable = [], [], []
         first = plan.stops[0] if plan.stops else None
         if first and first.port == self.snap.docked_port():
+            removable = [i.guid for i in first.drop]  # the operator may take these off, only if she needs the room
             wanted = [i.guid for i in first.load] + [i.guid for i, _ in first.stage]
             wanted += [f"{i.guid} U" for i in first.unload]
             orders = list(wanted)
-            wanted += [f"{i.guid} U" for i in first.drop]
             for _, stored in completing_unloads(self.snap, first):  # the stored part of a contract being finished
                 wanted += [i.guid for i in stored]
                 orders += [i.guid for i in stored]
@@ -463,7 +564,8 @@ class MainWindow(QMainWindow):
             wanted += [i.guid for i in mission.to_take_out]
             orders += [i.guid for i in mission.to_take_out]
         for name, on, guids in (("highlight.txt", self.highlight.isChecked(), wanted),
-                                ("crane_orders.txt", self.crane_orders.isChecked(), orders)):
+                                ("crane_orders.txt", self.crane_orders.isChecked(), orders),
+                                ("removable.txt", self.crane_orders.isChecked(), removable)):
             target = Path(self.path).with_name(name)
             try:
                 if target.parent.is_dir():
@@ -518,23 +620,51 @@ class MainWindow(QMainWindow):
         for key, widget in (("maxWeight", self.max_weight), ("maxItems", self.max_items), ("maxStops", self.max_stops)):
             self.settings.setValue(key, widget.value())
         self.settings.setValue("priority", self.priority.currentData())
+        for key, box in self.weight_spins.items():
+            self.settings.setValue(f"weight_{key}", box.value())
         self.settings.setValue("useHold", "true" if self.use_hold.isChecked() else "false")
         self.settings.setValue("stacking", "true" if self.stacking.isChecked() else "false")
         self.settings.setValue("noSplits", "true" if self.no_splits.isChecked() else "false")
         self.settings.setValue("highlight", "true" if self.highlight.isChecked() else "false")
         self.settings.setValue("craneOrders", "true" if self.crane_orders.isChecked() else "false")
-        self.plan_tree.clear()
         snap = self.snap
         start = self.start_port.currentData() or snap.here()
         if not start:
+            self.plan_tree.clear()
             self.plan_summary.setText("Pick a start port: the snapshot has no player or port positions.")
+            return
+        if self.planning:  # one at a time: this one starts when the run under way is done
+            self.plan_again = True
             return
         hold = None
         if self.use_hold.isChecked() and snap.hold_size:
             hold = Hold(snap.hold_size, snap.hold_sizes, self.stacking.isChecked())
         capacity = Capacity(self.max_weight.value(), self.max_items.value(), hold,
                             allow_splits=not self.no_splits.isChecked())
-        self.committed = make_plan(snap, start, capacity, self.priority.currentData(), self.max_stops.value())
+        # The planner thread gets its own copy of the snapshot's fields and its own hold, so nothing
+        # the window changes meanwhile can reach it.
+        self.plan_job = {"snap": copy.copy(snap), "start": start, "capacity": capacity,
+                         "priority": self.priority.currentData(), "max_stops": self.max_stops.value(),
+                         "no_room": self.no_room, "weights": self.weights()}
+        self.planning = True
+        self.busy.show()
+        self.plan_tree.setEnabled(False)  # the plan on screen is the old one: greyed until the new one is in
+        self.runner.run(self.plan_job)
+
+    def _planned(self, plan, error):
+        """The planner thread has finished (this runs on the window's thread)."""
+        job, self.plan_job, self.planning = self.plan_job, None, False
+        if self.plan_again:  # settings changed while it ran: this plan is out of date
+            self.plan_again = False
+            self.replan()
+            return
+        self.busy.hide()
+        self.plan_tree.setEnabled(True)
+        if error is not None:
+            self.plan_summary.setText(f"Planning failed: {error}")
+            return
+        snap = job["snap"]
+        self.committed = plan
         self.committed_at = snap.time[11:16]
         self.sea_note = self.sea_note.split(" The route on screen")[0]
         self.known_cargo = {item.guid for item in snap.items}
@@ -685,7 +815,20 @@ class MainWindow(QMainWindow):
             lines.append(f"{new_cargo} cargo items have appeared since then and are not in this route. Replan to include them.")
         if plan.dropped:
             lines.append(f"Cargo already on board that this route does not deliver: {plan.dropped}. It is left in the "
-                         "warehouse at the stop closest to its destination.")
+                         "warehouse at the stop closest to its destination. If the crane operator cannot make room for a load any "
+                         "other way, she takes such cargo off at that stop, the biggest first, and only as much as she needs.")
+        if snap.unmarked:
+            lines.append(f"{len(snap.unmarked)} piece(s) the game lists as delivered are not at their destination "
+                         f"({', '.join(sorted({i.name for i in snap.unmarked}))}), so they are planned as cargo still to deliver.")
+        if snap.delivered_aboard:
+            cells = sum(len(i.placed or []) for i in snap.delivered_aboard)
+            names = ", ".join(sorted({i.name for i in snap.delivered_aboard}))
+            lines.append(f"{len(snap.delivered_aboard)} delivered piece(s) are still in the hold ({names}), taking "
+                         f"{cells} of its cells. The route cannot use that room until they are taken off.")
+        left_out = sum(1 for i in snap.undelivered() if i.guid.upper() in self.no_room and i.location != BOAT)
+        if left_out:
+            lines.append(f"{left_out} items the crane operator could not fit into the hold are left out of this route. "
+                         "It plans for them again once the hold changes.")
         if plan.staged:
             lines.append(f"Spare space moves {plan.staged} more items closer to their destination for a later trip.")
         if plan.left_behind:

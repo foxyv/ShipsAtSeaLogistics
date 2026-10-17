@@ -1,0 +1,38 @@
+# Runs on every push and pull request: the Lua is checked (luacheck, a syntax check, the count of top-level
+# locals) and the tests are run. See tools/check_lua.py. luacheck is pinned to one release and its checksum.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Python packages
+        run: pip install -r app/requirements-dev.txt
+
+      - name: Install luacheck 1.2.0
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/luacheck"
+          cd "$RUNNER_TEMP/luacheck"
+          curl -sSL -o luacheck.exe https://github.com/lunarmodules/luacheck/releases/download/v1.2.0/luacheck.exe
+          echo "0f1c69c4d09f1ebb4d8df14c215e4553e2e639bd4cb7bf3c639b0daa6198317b  luacheck.exe" | sha256sum -c -
+          echo "LUACHECK=$RUNNER_TEMP/luacheck/luacheck.exe" >> "$GITHUB_ENV"
+
+      - name: Check the Lua
+        run: python tools/check_lua.py
+
+      - name: Run the tests
+        working-directory: app
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q tests

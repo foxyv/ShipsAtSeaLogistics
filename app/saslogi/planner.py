@@ -13,11 +13,13 @@ from dataclasses import dataclass, field, replace
 
 from .model import AT_SEA, BOAT, CargoItem, Snapshot
 from .packing import Hold
+from .scoring import Weights, arrival_hours, combine, contract_share, late_share, plan_terms, scale_of
 
 PRIORITIES = {
     "money": "Most money per km",  # the window relabels this with the chosen distance unit
     "stops": "Fewest stops",
     "full": "Fullest loads",
+    "custom": "Weighted score",  # contracts, money, fill, empty legs, stranded cargo and deadlines; see scoring.py
 }
 
 
@@ -267,6 +269,16 @@ def _weight(items) -> float:
     return sum(i.weight for i in items)
 
 
+def _big_first(item):
+    """Sort key: widest on the floor first, then tallest, so the small pieces come last as gap fillers.
+    (In simulation this loads far more of what was planned than taking pieces in any other order; see
+    tests/sim_loading.py.)"""
+    if not item.cells:
+        return (0, 0, item.guid)
+    xs, ys, zs = ([c[axis] for c in item.cells] for axis in range(3))
+    return (-(max(xs) - min(xs) + 1) * (max(ys) - min(ys) + 1), -(max(zs) - min(zs) + 1), item.guid)
+
+
 def _bulk(items) -> float:
     """Hold space the items take, in cells; falls back to weight when footprints are unknown."""
     return sum(len(i.cells) if i.cells else i.weight for i in items)
@@ -301,8 +313,14 @@ def _choose_load(snap, port, available, onboard, capacity, priority, typical_km,
         average = sum(rate.values()) / len(rate)
         groups = {dest: items for dest, items in groups.items() if dest in onboard_dests or rate[dest] >= average}
 
+    def hours_left(items):
+        """The least time left among the items' contracts that have a deadline still ahead, or None."""
+        left = [h for i in items if (h := snap.hours_left(i.mission)) is not None and h > 0]
+        return min(left) if left else None
+
     def key(dest):
         items = groups[dest]
+        urgent = hours_left(items)
         km = snap.distance_km(port, dest) or typical_km
         if priority == "money":
             rank = sum(i.value for i in items) / km
@@ -310,7 +328,7 @@ def _choose_load(snap, port, available, onboard, capacity, priority, typical_km,
             rank = len(items)
         else:
             rank = _bulk(items)  # big single-destination batches fill the boat and empty it in one stop
-        return (dest not in onboard_dests, -rank, dest or "")
+        return (urgent is None, urgent or 0.0, dest not in onboard_dests, -rank, dest or "")
 
     chosen: list[CargoItem] = []
     opened: set[str] = set()  # destinations not on board before this stop that now have cargo loaded
@@ -325,7 +343,12 @@ def _choose_load(snap, port, available, onboard, capacity, priority, typical_km,
         contracts: dict[str, list[CargoItem]] = defaultdict(list)
         for item in sorted(groups[dest], key=lambda i: (-i.value, i.guid)):
             contracts[item.mission.id].append(item)
-        for batch in sorted(contracts.values(), key=lambda b: (-sum(i.value for i in b), b[0].guid)):
+        def batch_key(b):
+            urgent = hours_left(b)
+            return (urgent is None, urgent or 0.0, -sum(i.value for i in b), b[0].guid)
+
+        for batch in sorted(contracts.values(), key=batch_key):
+            batch = sorted(batch, key=_big_first)
             trial = load.copy()
             if all(trial.add(item) for item in batch):
                 load = trial
@@ -356,6 +379,10 @@ class _Route:
     money: float = 0.0
     delivered: int = 0
     fill_sum: float = 0.0
+    contracts: float = 0.0  # whole contracts delivered on time (fractions for contracts delivered in pieces)
+    empty_km: float = 0.0  # km sailed with nothing aboard
+    fill_km: float = 0.0  # how full the hold was on each leg sailed, times the leg's km
+    late: float = 0.0  # contracts that arrived after their deadline
     positions: dict = field(default_factory=dict)  # where each item on board sits in the hold
 
     def key(self):
@@ -393,21 +420,43 @@ def _visit(snap, route, port, here, staying, chosen, load, typical_km):
     at_port = dict(route.at_port)
     at_port[port] = tuple(i for i in here if i.guid not in loaded and i.dest != port)
     stop.onboard_count, stop.onboard_weight, stop.fill = len(onboard), _weight(onboard), load.fill()
-    stop.earned = sum(i.value for i in stop.unload + stop.hand_in)
     leg = stop.leg_km if stop.leg_km is not None else typical_km
+    # A contract that arrives after its deadline is lost: it earns nothing.
+    arrival = arrival_hours(snap, route.km + leg, len(route.stops))
+    delivering = stop.unload + stop.hand_in
+    lost = sum(late_share(snap, i, arrival) for i in delivering)
+    stop.earned = sum(i.value for i in delivering if not late_share(snap, i, arrival))
     return _Route(cur=port, onboard=onboard, at_port=at_port, stops=route.stops + (stop,),
                   km=route.km + leg, money=route.money + stop.earned,
-                  delivered=route.delivered + len(stop.unload) + len(stop.hand_in),
+                  delivered=route.delivered + len(delivering),
                   fill_sum=route.fill_sum + (stop.fill if stop.fill is not None else 1.0),
+                  contracts=route.contracts + sum(contract_share(i) for i in delivering) - lost,
+                  empty_km=route.empty_km + (leg if route.stops and not route.onboard else 0.0),
+                  fill_km=route.fill_km + ((route.stops[-1].fill if route.stops[-1].fill is not None else 1.0) * leg
+                                           if route.stops else 0.0),
+                  late=route.late + lost,
                   positions=load.masks)
 
 
-def _objective(route, priority, typical_km, carried_credit=0.5, km_price=None):
+def _objective(route, priority, typical_km, carried_credit=0.5, km_price=None, weights=None, scale=None):
     """How good a partial route is.
 
     Cargo still on board earns part credit so that loading is never penalised. For "money", `km_price`
     is what a km of sailing is charged at; without one the route is scored as a plain money-per-km ratio.
     """
+    if priority == "custom":
+        # The scoring model on a partial route. Cargo still aboard earns part credit, as above; what is
+        # left behind (stranded) cannot be told until the route is finished, so it counts there.
+        aboard = carried_credit * sum(i.value for i in route.onboard)
+        terms = {
+            "contracts": (route.contracts + carried_credit * sum(contract_share(i) for i in route.onboard)) / scale.contracts,
+            "money": (route.money + aboard - (km_price or 0.0) * route.km) / scale.value,
+            "fill": route.fill_km / route.km if route.km else 0.0,
+            "empty": route.empty_km / route.km if route.km else 0.0,
+            "stranded": 0.0,
+            "late": route.late / scale.urgent,
+        }
+        return combine(weights, terms)
     if priority == "money":
         earned = route.money + carried_credit * sum(i.value for i in route.onboard)
         if km_price is not None:
@@ -420,8 +469,11 @@ def _objective(route, priority, typical_km, carried_credit=0.5, km_price=None):
 
 
 def make_plan(snap: Snapshot, start: str, capacity: Capacity, priority: str = "full", max_stops: int = 12,
-              beam_width: int = 32) -> Plan:
-    items = [i for i in snap.undelivered() if i.location is not None and i.dest]
+              beam_width: int = 32, no_room: frozenset | set = frozenset(), weights: Weights | None = None) -> Plan:
+    """`no_room` is the guids of cargo the crane operator found cannot be fitted into the hold as it
+    stands: it is not offered for loading, so the plan does not count on it."""
+    items = [i for i in snap.undelivered() if i.location is not None and i.dest
+             and not (i.guid.upper() in no_room and i.location != BOAT)]
     at_port: dict[str, tuple] = defaultdict(tuple)
     for item in items:
         if item.location != BOAT:
@@ -438,20 +490,26 @@ def make_plan(snap: Snapshot, start: str, capacity: Capacity, priority: str = "f
         capacity = replace(capacity, blocked=capacity.hold.mask(snap.hold_blocked))
     origin = _Route(start, onboard, dict(at_port), positions=positions)
 
-    def search(width, km_price=None):
+    weights = weights or Weights()
+    scale = scale_of(snap)
+
+    def search(width, km_price=None, mode=None):
         """Beam search; returns the finished plans of the routes that survive to the stop limit."""
+        mode = mode or priority
+        loading = "full" if mode == "custom" else mode  # how cargo is picked at a port: by bulk for the weighted score
+
         def score(route):
-            return _objective(route, priority, typical_km, km_price=km_price)
+            return _objective(route, mode, typical_km, km_price=km_price, weights=weights, scale=scale)
 
         # Routes are only compared with others of the same length.
-        beam = list(_visits(snap, origin, start, capacity, priority, typical_km))
+        beam = list(_visits(snap, origin, start, capacity, loading, typical_km))
         for _ in range(max_stops - 1):
             grown: dict = {}
             for route in beam:
                 targets = ({i.dest for i in route.onboard} | {p for p, held in route.at_port.items() if held}) - {route.cur}
                 extended = False
                 for port in sorted(targets):
-                    for nxt in _visits(snap, route, port, capacity, priority, typical_km):
+                    for nxt in _visits(snap, route, port, capacity, loading, typical_km):
                         extended = True
                         key = nxt.key()
                         if key not in grown or score(nxt) > score(grown[key]):
@@ -465,6 +523,13 @@ def make_plan(snap: Snapshot, start: str, capacity: Capacity, priority: str = "f
         # that never get delivered are dropped, and the stops made only for them go too. So every
         # surviving route is finished, and the plans are compared on what they really do.
         return [_finish(snap, route, onboard, capacity, items, positions) for route in beam]
+
+    if priority == "custom":
+        # What a km of sailing costs is worked out the way the money priority does, by a quick scout.
+        scout = search(SCOUT_WIDTH, mode="money")
+        km_price = KM_PRICE_SHARE * max(plan.total_money / (plan.total_km + typical_km) for plan in scout)
+        plans = search(None, km_price) + scout
+        return max(plans, key=lambda plan: combine(weights, plan_terms(snap, plan, scale, km_price)))
 
     if priority != "money":
         plans = search(None)

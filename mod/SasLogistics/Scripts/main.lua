@@ -1,9 +1,29 @@
 -- SasLogistics: read-only telemetry for the external logistics planner.
--- F8 writes snapshot.json into this mod's folder; F7 toggles writing it every AUTO_EXPORT_SECONDS.
+-- F8 writes snapshot.json into this mod's folder; F7 toggles writing it every AUTO_EXPORT_SECONDS,
+-- which is on from the start of the game.
 -- F6 toggles highlighting, in any open inventory window, the cargo the planner wants loaded here.
 -- Nothing here changes the game's own state. Highlighting changes how inventory slots are drawn and
 -- puts the game's in-world marker over cargo to unload; those markers are this mod's own and are
 -- removed again when the cargo comes off, when highlighting is switched off, and on reload.
+
+
+-- Which copy of this script is running. The log says a release name and a checksum of the file itself
+-- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
+-- game loaded the version that was meant to be deployed.
+SCRIPT_VERSION = "2026-10-16.1"
+function ScriptChecksum()
+    local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
+    if not file then return "unreadable", 0 end
+    local text = file:read("*a")
+    file:close()
+    local hash = 2166136261  -- FNV-1a, 32 bits
+    for i = 1, #text do hash = ((hash ~ text:byte(i)) * 16777619) & 0xFFFFFFFF end
+    return string.format("%08X", hash), #text
+end
+do
+    local checksum, bytes = ScriptChecksum()
+    print("[SasLogistics] version " .. SCRIPT_VERSION .. ", file checksum " .. checksum .. " (" .. bytes .. " bytes)\n")
+end
 
 local AUTO_EXPORT_SECONDS = 20
 
@@ -202,6 +222,19 @@ local function ExportMissions()
                 rewards = Arr(),
             }
             ExportContext(mission.MissionDataContext, entry.context, "missionContext")
+            -- A deadline is a calendar-wait objective in the mission's graph: it ends the mission when the
+            -- calendar reaches its target time. Its target is a UE date time, in ticks (100 ns units).
+            entry.objectives = Arr()
+            Try(function()
+                Each(mission.MissionObjectives, function(objective)
+                    local class = ClassName(objective)
+                    entry.objectives[#entry.objectives + 1] = class
+                    if class and class:find("CalendarWait", 1, true) then
+                        local ticks = Try(function() return objective.TargetDateTime.Ticks end, "deadline")
+                        if ticks then entry.deadlineTicks = tostring(ticks) end  -- a string: too big for a float
+                    end
+                end)
+            end, "objectives")
             if IsObject(descriptor) then
                 entry.title = Try(function() return descriptor:GetMissionTitle():ToString() end, "title")
                 entry.asset = ShortName(Try(function() return descriptor:GetMissionDataAsset() end, "asset"))
@@ -426,6 +459,15 @@ end
 local function Export(reason)
     Errors, ErrorSeen, Footprints = Arr(), {}, {}
     local snapshot = { version = 1, time = os.date("%Y-%m-%dT%H:%M:%S"), reason = reason, footprints = Footprints }
+    -- The game's calendar: now in the same ticks as a mission's deadline, and how many game seconds pass
+    -- in a real second, for turning sailing time into game time.
+    snapshot.calendar = Try(function()
+        local calendar = FindFirstOf("CalendarSubsystem")
+        return {
+            nowTicks = tostring(calendar:GetUniversalTime().Ticks),
+            gameSpeed = calendar:GetGameSpeed() + 0.0,
+        }
+    end, "calendar")
     snapshot.cellSize = Try(function()
         return StaticFindObject("/Script/Sas.Default__SasInventorySettings").GridInventoryCellSize + 0.0
     end, "cell size")
@@ -460,7 +502,7 @@ end
 
 -- Key presses only set flags. All the work happens in one timer on the game thread (see the end of
 -- this file), so the mod's Lua never runs on two threads at once.
-local AutoExport = false
+local AutoExport = true  -- the telemetry is on from the start; F7 turns it off and on
 local ExportRequested = false
 
 RegisterKeyBind(Key.F8, function()
@@ -521,7 +563,7 @@ local function ReadHighlights()
     local file = io.open(HighlightPath, "r")
     if not file then return wanted, 0 end
     for line in file:lines() do
-        local guid, kind = line:match("^(%x+)%s*(%a?)%s*$")
+        local guid, kind = line:match("^(%x+)%s*(U?)%s*$")  -- only "U" means unload; any other letter is not a line we know
         if guid and #guid == 32 then
             wanted[guid:upper()] = (kind == "U") and ORANGE or GREEN
             count = count + 1
@@ -948,5 +990,10 @@ else
     end)
 end
 
-print("[SasLogistics] loaded: F8 = write snapshot, F7 = toggle auto export, F6 = toggle highlighting and unload markers\n")
+print("[SasLogistics] loaded: telemetry is on (a snapshot every " .. AUTO_EXPORT_SECONDS .. " s); F8 = write snapshot now, F7 = toggle auto export, F6 = toggle highlighting and unload markers\n")
 
+-- For the tests (app/tests/lua_harness.py): when a test sets SAS_TEST before loading this script, the local
+-- functions and values the tests need are handed out in SasTest. In the game SAS_TEST is never set.
+if SAS_TEST then
+    SasTest = { ReadHighlights = ReadHighlights, UnloadWanted = UnloadWanted, ORANGE = ORANGE, GREEN = GREEN }
+end

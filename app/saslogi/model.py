@@ -70,6 +70,7 @@ class Mission:
     money_delivery: float = 0.0
     xp: float = 0.0
     items: list[CargoItem] = field(default_factory=list)
+    deadline_ticks: int | None = None  # when the game's calendar ends the contract, in UE date time ticks
 
     @property
     def short_id(self) -> str:
@@ -108,6 +109,7 @@ class Boat:
     location: tuple[float, float, float] | None
     payload: float | None
     path: str
+    max_speed_kn: float | None = None
 
 
 @dataclass
@@ -134,9 +136,26 @@ class Snapshot:
     boat_name: str = ""  # the owned boat nearest the player, i.e. the one being driven
     aboard: list[HoldItem] = field(default_factory=list)
     hold_cells_used: int = 0
-    hold_blocked: list = field(default_factory=list)  # hold cells taken by things that are not contract cargo
+    hold_blocked: list = field(default_factory=list)  # hold cells taken by things the planner does not move: not contract cargo, or cargo already delivered
+    delivered_aboard: list = field(default_factory=list)  # delivered contract cargo that is still in the hold
+    unmarked: list = field(default_factory=list)  # cargo the game lists as delivered that is not at its destination
     sea_km: dict = field(default_factory=dict)  # (port, port) -> km by sea, when sea routes have been worked out
     errors: list[str] = field(default_factory=list)
+    cruise_knots: float | None = None  # how fast the owned boat being driven sails
+    now_ticks: int | None = None  # the game calendar's time now, in the same ticks as a contract's deadline
+    game_speed: float = 1.0  # game seconds that pass in a real second
+
+    def sail_hours(self, km: float) -> float:
+        """Game hours to sail `km`: the real time it takes at the boat's cruising speed, times how many
+        game seconds pass in a real second."""
+        knots = self.cruise_knots or DEFAULT_KNOTS
+        return km * 1000 / (knots * KNOT_MPS) / 3600 * self.game_speed
+
+    def hours_left(self, mission: Mission) -> float | None:
+        """Game hours until the contract's deadline, or None when it has none (or the clock is unknown)."""
+        if mission.deadline_ticks is None or self.now_ticks is None:
+            return None
+        return (mission.deadline_ticks - self.now_ticks) / TICKS_PER_HOUR
 
     def port_name(self, port_id: str | None) -> str:
         if port_id == BOAT:
@@ -225,6 +244,19 @@ class Snapshot:
         return [i for i in self.items if not i.delivered and i.mission.status == "InProgress"]
 
 
+TICKS_PER_HOUR = 36_000_000_000  # a UE date time tick is 100 ns
+KNOT_MPS = 0.514444
+DEFAULT_KNOTS = 12.0  # when the boat's speed is not known
+CRUISE_SHARE = 0.9  # of its top speed
+
+
+def _ticks(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _vec(value) -> tuple[float, float, float] | None:
     return tuple(value) if isinstance(value, list) and len(value) == 3 else None
 
@@ -242,6 +274,9 @@ def _placed_cells(shape, placement) -> list:
 
 def parse_snapshot(data: dict) -> Snapshot:
     snap = Snapshot(time=data.get("time", ""), errors=list(data.get("errors") or []))
+    calendar = data.get("calendar") or {}
+    snap.now_ticks = _ticks(calendar.get("nowTicks"))
+    snap.game_speed = float(calendar.get("gameSpeed") or 1.0)
     for raw in data.get("ports") or []:
         if raw.get("id"):
             snap.ports[raw["id"]] = Port(raw["id"], raw.get("name") or raw["id"], _vec(raw.get("location")))
@@ -251,7 +286,8 @@ def parse_snapshot(data: dict) -> Snapshot:
             snap.docks.append((raw["port"], _vec(raw["location"])))
     for raw in data.get("boats") or []:
         snap.boats.append(Boat(raw.get("boatName") or raw.get("class") or "Boat", bool(raw.get("owned")),
-                               _vec(raw.get("location")), raw.get("payload"), raw.get("path", "")))
+                               _vec(raw.get("location")), raw.get("payload"), raw.get("path", ""),
+                               raw.get("maxSpeed")))
 
     snap.cell_cm = data.get("cellSize")
     footprints = data.get("footprints") or {}
@@ -266,6 +302,8 @@ def parse_snapshot(data: dict) -> Snapshot:
         placed = [b for b in owned if b.location] if snap.player_location else []
         current = min(placed, key=lambda b: math.dist(b.location[:2], snap.player_location[:2])) if placed else owned[0]
         snap.boat_name = current.name
+        if current.max_speed_kn:
+            snap.cruise_knots = CRUISE_SHARE * float(current.max_speed_kn)
     aboard_raw: list[dict] = []
     placed_cells: dict[str, list] = {}  # item guid -> the hold cells it occupies now
     where: dict[str, tuple[str | None, str, dict]] = {}
@@ -297,7 +335,8 @@ def parse_snapshot(data: dict) -> Snapshot:
             continue  # not a cargo mission
         mission = Mission(id=context.get(ID_TAG) or raw.get("path", ""), title=raw.get("title") or "?",
                           status=raw.get("status") or "?", kind=raw.get("asset") or raw.get("class") or "",
-                          start=context.get(START_TAG), end=context.get(END_TAG))
+                          start=context.get(START_TAG), end=context.get(END_TAG),
+                          deadline_ticks=_ticks(raw.get("deadlineTicks")))
         for reward in raw.get("rewards") or []:
             amount = reward.get("amount") or 0
             if "Money" in (reward.get("type") or ""):
@@ -311,10 +350,19 @@ def parse_snapshot(data: dict) -> Snapshot:
         delivered = set(context.get(DELIVERED_TAG) or [])
         for guid in spawned:
             place, kind, item_raw = where.get(guid, (None, "", {}))
+            # The game keeps a piece marked delivered once it has reached its destination, even if it is
+            # then taken out again (out of the warehouse, say) and carried off. A piece found anywhere
+            # but its destination is not delivered: it is planned as cargo still to deliver. A piece
+            # that is nowhere (consumed on delivery) stays delivered.
+            flagged = guid in delivered
+            away = (flagged and mission.status == "InProgress" and place is not None
+                    and mission.end is not None and place != mission.end)
             item = CargoItem(guid=guid, mission=mission, name=item_raw.get("name") or "?",
                              weight=item_raw.get("weight") or 0.0, size=item_raw.get("size"),
-                             location=place, holder=kind, delivered=guid in delivered, boarded=guid in boarded,
+                             location=place, holder=kind, delivered=flagged and not away, boarded=guid in boarded,
                              kind=item_raw.get("def") or "", cells=footprints.get(item_raw.get("def")) or None)
+            if away:
+                snap.unmarked.append(item)
             if not item.delivered:
                 item.value = mission.money_delivery / len(spawned)
                 if not item.boarded:
@@ -324,14 +372,30 @@ def parse_snapshot(data: dict) -> Snapshot:
         snap.missions.append(mission)
 
     by_guid = {item.guid: item for item in snap.items}
+    open_guids = {item.guid for item in snap.undelivered()}
     for guid, cells in placed_cells.items():
         if guid in by_guid:
             by_guid[guid].placed = cells
+            if guid not in open_guids:
+                # Delivered (or the contract is over) but still standing in the hold: it takes room all
+                # the same, and the plan does not move it.
+                snap.hold_blocked += cells
+                snap.delivered_aboard.append(by_guid[guid])
         else:
             snap.hold_blocked += cells
     snap.aboard = [HoldItem(raw.get("name") or "?", raw.get("weight") or 0.0, by_guid.get(raw.get("guid")))
                    for raw in aboard_raw]
     return snap
+
+
+def read_no_room(path: str | Path) -> frozenset[str]:
+    """The cargo the crane operator reports cannot be fitted into the hold: one guid a line in
+    loadfail.txt next to the snapshot. Nothing there, or no file, means nothing is reported."""
+    try:
+        text = Path(path).with_name("loadfail.txt").read_text(encoding="ascii", errors="ignore")
+    except OSError:
+        return frozenset()
+    return frozenset(line.strip().upper() for line in text.splitlines() if line.strip())
 
 
 def load_snapshot(path: str | Path) -> Snapshot:

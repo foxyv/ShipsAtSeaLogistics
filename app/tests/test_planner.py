@@ -1,6 +1,7 @@
 import unittest
 
 from saslogi.model import AT_SEA, BOAT, parse_snapshot
+from saslogi.packing import Hold
 from saslogi.planner import (
     Capacity, advance, check_load, completing_unloads, has_work, make_plan, remaining, waiting_by_contract,
 )
@@ -383,6 +384,71 @@ class PlannerTests(unittest.TestCase):
         plan = make_plan(snap, "Port_A", Capacity(), "full", max_stops=2)
         self.assertEqual(len(plan.stops), 2)
         self.assertEqual(plan.left_behind, 1)
+
+    def test_cargo_the_operator_could_not_fit_is_not_loaded(self):
+        snap = snapshot([mission("m1", "B", ["g1", "g2"])], [store("warehouse", "A", ["g1", "g2"])])
+        plan = make_plan(snap, "Port_A", Capacity(), "full", max_stops=10, no_room={"G1"})
+        loaded = {item.guid for stop in plan.stops for item in stop.load}
+        self.assertEqual(loaded, {"g2"})
+
+    def test_cargo_already_on_the_boat_is_not_dropped_by_a_report(self):
+        snap = snapshot([mission("m1", "B", ["g1"])], [store("boatCargoArea", None, ["g1"])])
+        plan = make_plan(snap, "Port_A", Capacity(), "full", max_stops=10, no_room={"G1"})
+        self.assertEqual(plan.delivered, 1)
+
+    def test_reading_the_operators_report(self):
+        import tempfile
+        from pathlib import Path
+        from saslogi.model import read_no_room
+        with tempfile.TemporaryDirectory() as folder:
+            snapshot_path = Path(folder) / "snapshot.json"
+            self.assertEqual(read_no_room(snapshot_path), frozenset())
+            (Path(folder) / "loadfail.txt").write_text("abc123\n\nDEF456\n", encoding="ascii")
+            self.assertEqual(read_no_room(snapshot_path), frozenset({"ABC123", "DEF456"}))
+
+    def test_contract_deadline_and_the_game_clock(self):
+        from saslogi.model import TICKS_PER_HOUR
+        ports = [{"id": "Port_A", "name": "A", "location": [0.0, 0.0, 0.0]}]
+        urgent = mission("m1", "B", ["g1"])
+        urgent["deadlineTicks"] = str(1_000 * TICKS_PER_HOUR + 6 * TICKS_PER_HOUR)
+        plain = mission("m2", "B", ["g2"])
+        snap = parse_snapshot({"time": "t", "ports": ports, "missions": [urgent, plain],
+                               "containers": [store("warehouse", "A", ["g1", "g2"])],
+                               "calendar": {"nowTicks": str(1_000 * TICKS_PER_HOUR), "gameSpeed": 8.0}})
+        by_id = {m.id: m for m in snap.missions}
+        self.assertEqual(snap.hours_left(by_id["m1"]), 6.0)
+        self.assertIsNone(snap.hours_left(by_id["m2"]))
+        self.assertEqual(snap.game_speed, 8.0)
+
+    def test_delivered_cargo_still_in_the_hold_takes_up_room(self):
+        data = {"ports": [{"id": "Port_A", "name": "A", "location": [0.0, 0.0, 0.0]},
+                          {"id": "Port_B", "name": "B", "location": [1_000_000.0, 0.0, 0.0]}],
+                "missions": [{**mission("m1", "B", ["g1"], delivered=["g1"]), "status": "Succeeded"},
+                             mission("m2", "B", ["g2"])],  # m1 is over, but its piece is still in the hold
+                "footprints": {"bar": [[0, 0, 0], [1, 0, 0]]},
+                "containers": [{"kind": "boatCargoArea", "path": "A /L/b.Boat:P.A_1", "gridSize": [2, 1, 1],
+                                "items": [{"guid": "g1", "def": "bar"}],
+                                "placements": [{"guid": "g1", "position": [0, 0, 0], "yaw": 0.0}]},
+                               {"kind": "warehouse", "port": "Port_A",
+                                "items": [{"guid": "g2", "def": "bar", "name": "Crate", "weight": 10.0}]}]}
+        snap = parse_snapshot(data)
+        self.assertEqual(snap.hold_blocked, [(0, 0, 0), (1, 0, 0)])
+        self.assertEqual([i.guid for i in snap.delivered_aboard], ["g1"])
+        plan = make_plan(snap, "Port_A", Capacity(hold=Hold((2, 1, 1))), "stops", max_stops=3)
+        self.assertEqual(plan.stops[0].load, [])  # the room is not there to use
+
+    def test_delivered_cargo_found_away_from_its_destination_is_still_to_deliver(self):
+        # The game keeps g1 and g2 marked delivered. g1 was taken out of B's warehouse and is on the boat; g2
+        # waits in B's warehouse (delivered, to be taken out); g3 is nowhere (consumed on delivery).
+        snap = snapshot([mission("m1", "B", ["g1", "g2", "g3"], delivered=["g1", "g2", "g3"])],
+                        [store("boatCargoArea", None, ["g1"]), store("warehouse", "B", ["g2"])])
+        by_guid = {i.guid: i for i in snap.items}
+        self.assertFalse(by_guid["g1"].delivered)
+        self.assertTrue(by_guid["g2"].delivered)
+        self.assertTrue(by_guid["g3"].delivered)
+        self.assertEqual([i.guid for i in snap.unmarked], ["g1"])
+        self.assertEqual([i.guid for i in snap.undelivered()], ["g1"])
+        self.assertGreater(by_guid["g1"].value, 0)
 
 
 if __name__ == "__main__":
