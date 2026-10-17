@@ -82,6 +82,20 @@ class PlanningThreadTests(unittest.TestCase):
         self.assertEqual(runs, [3, 7])  # the middle request was overtaken by the last
         self.assertTrue(self.window.plan_tree.isEnabled())
 
+    def test_the_window_can_be_made_small_and_the_route_controls_scroll(self):
+        controls = self.window.route_controls
+        self.assertIs(controls.widget().parent(), controls.viewport())  # the controls sit in a scroll area
+        # Nothing holds the window wide or tall: the status line wraps, the controls scroll.
+        hint = self.window.minimumSizeHint()
+        self.assertLess(hint.width(), 700)
+        self.assertLess(hint.height(), 450)
+        self.window.tabs.setCurrentWidget(controls.parentWidget())
+        self.window.resize(hint.width(), hint.height())
+        self.window.show()
+        QTest.qWait(50)
+        # Small enough, the controls are taller than the room they have and can be scrolled.
+        self.assertGreater(controls.verticalScrollBar().maximum(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,8 +13,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
-    QProgressBar, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
+    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -147,11 +147,15 @@ class MainWindow(QMainWindow):
         self.known_cargo: set[str] = set()  # cargo that existed when that plan was made
 
         self.status = QLabel()
+        self.status.setWordWrap(True)  # a long path would otherwise stop the window being made narrow
+        self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # and so would its longest word
         self.stale = QLabel()
         self.stale.setWordWrap(True)
         self.stale.setStyleSheet("color: #e5484d; font-weight: bold;")  # a red that reads on light and dark themes
         self.stale.hide()
         self.units = QComboBox()
+        self.units.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.units.setMinimumContentsLength(10)
         self.units.setToolTip("Units for every distance shown. Routes are not replanned when this changes.")
         for key, (label, _) in DISTANCE_UNITS.items():
             self.units.addItem(label, key)
@@ -169,6 +173,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.contracts, "Contracts")
         self.aboard = self._table(["Cargo", "ID", "Contract", "Deliver to", "kg", "Money", "km from here"])
         self.aboard_summary = QLabel()
+        self.aboard_summary.setWordWrap(True)
         aboard_layout = QVBoxLayout()
         aboard_layout.addWidget(self.aboard_summary)
         aboard_layout.addWidget(self.aboard)
@@ -224,6 +229,7 @@ class MainWindow(QMainWindow):
         self.weights_box = QWidget()
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.weight_preset = QComboBox()
         self.weight_preset.addItem("Custom", None)
         for name in PRESETS:
@@ -284,6 +290,7 @@ class MainWindow(QMainWindow):
         self.crane_orders.setChecked(self.settings.value("craneOrders", "true") == "true")
 
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         form.addRow("Start port", self.start_port)
         form.addRow("Prioritise", self.priority)
         form.addRow(self.weights_box)
@@ -345,6 +352,14 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         panel.setLayout(side)
         panel.setFixedWidth(330)
+        # The controls are tall: they scroll, so that the window can be made as small as you like.
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFixedWidth(330 + scroll.verticalScrollBar().sizeHint().width() + 4)
+        self.route_controls = scroll
         layout = QHBoxLayout()
         self.busy = QWidget()
         busy_layout = QHBoxLayout()
@@ -359,7 +374,7 @@ class MainWindow(QMainWindow):
         right = QVBoxLayout()
         right.addWidget(self.busy)
         right.addWidget(self.plan_tree, 1)
-        layout.addWidget(panel)
+        layout.addWidget(scroll)
         layout.addLayout(right, 1)
         tab = QWidget()
         tab.setLayout(layout)
