@@ -544,6 +544,7 @@ class MainWindow(QMainWindow):
         """Tells the mods which cargo to move at the port the player is in: what to load, and, marked
         with a U, what still has to come off the boat. highlight.txt is shown in the game's windows and
         crane_orders.txt is worked by the crane operator; each is left empty while its box is off.
+        Cargo to take out of the warehouse to finish a contract is highlighted but not ordered.
         Cargo the route only leaves in the warehouse (not delivered here, put off at the nearest stop), and
         delivered pieces left in the hold, are neither marked nor ordered: a mark in the game means the
         operator will move that piece, so a piece she will not move must not carry one. The ones the route
@@ -556,13 +557,14 @@ class MainWindow(QMainWindow):
             wanted = [i.guid for i in first.load] + [i.guid for i, _ in first.stage]
             wanted += [f"{i.guid} U" for i in first.unload]
             orders = list(wanted)
-            for _, stored in completing_unloads(self.snap, first):  # the stored part of a contract being finished
+            # The stored part of a contract being finished, and the cargo to take out of the warehouse to
+            # finish one, wherever the boat is docked, is only highlighted for the player to take out. It
+            # is not ordered: a plain line in crane_orders.txt means "load this onto the boat", and the
+            # operator would carry the pieces the player puts on the dock for the delivery back aboard.
+            for _, stored in completing_unloads(self.snap, first):
                 wanted += [i.guid for i in stored]
-                orders += [i.guid for i in stored]
-        # cargo to take out to finish a contract, wherever the boat is docked
         for mission in self.snap.completable_at(self.snap.docked_port()):
             wanted += [i.guid for i in mission.to_take_out]
-            orders += [i.guid for i in mission.to_take_out]
         for name, on, guids in (("highlight.txt", self.highlight.isChecked(), wanted),
                                 ("crane_orders.txt", self.crane_orders.isChecked(), orders),
                                 ("removable.txt", self.crane_orders.isChecked(), removable)):
