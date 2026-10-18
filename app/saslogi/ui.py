@@ -153,7 +153,7 @@ class MainWindow(QMainWindow):
         self.runner.finished.connect(self._planned)
         sys.setswitchinterval(0.002)  # a busy planner thread must not make the window sluggish
         self.committed = None  # the plan being followed; it is kept until something calls for a new one
-        self.replanned_for = frozenset()  # the cargo, unknown to the plan, that the last automatic replan was for
+        self.strays = []  # cargo on the boat that the route being followed does not mention
         self.committed_at = ""
         self.known_cargo: set[str] = set()  # cargo that existed when that plan was made
 
@@ -846,18 +846,11 @@ class MainWindow(QMainWindow):
             self.replan()
             return
         # Cargo that came aboard after the route was planned has no line in it. What is for the port the boat is
-        # in is added to the unloads at once, so that it is shown and sent to the crane operator; and the route
-        # is worked out again, once for each new set of such cargo, so that the rest is planned.
+        # in is added to the unloads at once, so that it is shown and sent to the crane operator. The route itself
+        # is never changed behind your back: a new route replaces the orders the operator is carrying out, and
+        # pieces would be moved back and forth. The rest is pointed out, and Replan from here includes it.
         view = with_unplanned_unloads(view, self.snap, self.snap.docked_port())
-        strays = frozenset(i.guid for i in unplanned_aboard(view, self.snap))
-        if not strays:
-            self.replanned_for = frozenset()
-        if strays and strays != self.replanned_for and not self.planning:
-            self.replanned_for = strays
-            self.committed = plan
-            self.show_plan(view)
-            self.replan()
-            return
+        self.strays = sorted(unplanned_aboard(view, self.snap), key=lambda i: i.name)
         self.committed = plan
         self.show_plan(view)
 
@@ -890,6 +883,13 @@ class MainWindow(QMainWindow):
                 title, str(stop.onboard_count), money(stop.onboard_weight), money(stop.earned),
                 self.distance(stop.leg_km),
             ])
+            if number == 1 and self.strays:
+                row = QTreeWidgetItem(node, [
+                    f"Aboard, but not in this route (loaded since it was made): press Replan from here to include them\n"
+                    f"{summarise(self.strays)}", str(len(self.strays)), money(sum(i.weight for i in self.strays)), "", ""])
+                font = row.font(0)
+                font.setBold(True)
+                row.setFont(0, font)
             if number == 1:
                 headline, details = self._load_check_lines()
                 self.load_check.setText(headline + ("" if not details else "\n\n" + "\n\n".join(details)))
