@@ -10,7 +10,7 @@
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.2"
+SCRIPT_VERSION = "2026-10-18.3"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -649,39 +649,57 @@ local function Paint(slot, colour, opacity)
     Attempt("opacity", function() slot:SetRenderOpacity(opacity) end)
 end
 
+-- What is known of each inventory slot, by the slot's address: its item and what it was last painted. A warehouse
+-- window leaves hundreds of slots alive, and asking the game about every one of them every second (its name, its
+-- window, its item, then three paint calls) stalled the game for a moment each time, for as long as the window
+-- was open. A slot is now asked about once, repainted only when what it should look like changes, and its item is
+-- looked at again whenever the game refills it (the hooks below) or every SLOT_FORGET_S at the latest.
+local SlotInfo = {}
+local SlotInfoAt = 0
+local SLOT_FORGET_S = 30
+local Passes, PassSlowest = 0, 0
+
+local function SlotAddress(slot)
+    local ok, address = pcall(function() return slot:GetAddress() end)
+    return ok and address or nil
+end
+
 local function UpdateHighlights()
     local wanted, count = {}, 0
     if HighlightOn then wanted, count = ReadHighlights() end
     Wanted = wanted
     if count == 0 and not Touched then return end
     local wasTouched = Touched
+    local started = os.clock()
+    if started - SlotInfoAt > SLOT_FORGET_S then SlotInfo, SlotInfoAt = {}, started end
 
-    local windows, shown = {}, 0  -- slots grouped by the inventory window they belong to
+    local slots, shown = {}, 0
     for _, slot in ipairs(FindAllOf("WBP_ItemInventorySlot_C") or {}) do
-        local name = IsObject(slot) and slot:GetFullName() or nil
-        if name and not name:find("Default__", 1, true) then
-            local owner = "?"
-            pcall(function() owner = slot.WBP_ItemInventory:GetFullName() end)
-            local guid = SlotGuid(slot)
-            local window = windows[owner] or { slots = {}, hit = false }
-            windows[owner] = window
-            window.slots[#window.slots + 1] = { slot, guid }
-            if guid and wanted[guid] then
-                window.hit = true
-                shown = shown + 1
+        local address = IsObject(slot) and SlotAddress(slot) or nil
+        if address then
+            local info = SlotInfo[address]
+            if not info then
+                local name = slot:GetFullName()
+                info = { skip = name:find("Default__", 1, true) ~= nil }
+                if not info.skip then info.guid = SlotGuid(slot) end
+                SlotInfo[address] = info
+            end
+            if not info.skip then
+                slots[#slots + 1] = { slot, info }
+                if info.guid and wanted[info.guid] then shown = shown + 1 end
             end
         end
     end
     -- Slots are only restyled while something wanted is on screen, plus once more to put them back.
+    local painted = 0
     if shown > 0 or wasTouched then
-        for _, window in pairs(windows) do
-            for _, pair in ipairs(window.slots) do
-                local slot, guid = pair[1], pair[2]
-                if guid and wanted[guid] then
-                    Paint(slot, wanted[guid], 1.0)
-                else
-                    Paint(slot, WHITE, 1.0)
-                end
+        for _, pair in ipairs(slots) do
+            local slot, info = pair[1], pair[2]
+            local colour = (info.guid and wanted[info.guid]) or WHITE
+            if info.painted ~= colour then
+                Paint(slot, colour, 1.0)
+                info.painted = colour
+                painted = painted + 1
             end
         end
     end
@@ -690,6 +708,13 @@ local function UpdateHighlights()
     if report ~= LastReport then
         LastReport = report
         print("[SasLogistics] highlight: " .. report .. "\n")
+    end
+    -- How long the pass took, so a stall can be traced: said when a pass is slow (25 ms or more).
+    local took = (os.clock() - started) * 1000
+    Passes = Passes + 1
+    if took >= 25 and took > PassSlowest * 0.5 then
+        PassSlowest = math.max(PassSlowest, took)
+        print(string.format("[SasLogistics] highlight pass took %.0f ms: %d slot(s) looked at, %d repainted\n", took, #slots, painted))
     end
 end
 
@@ -700,12 +725,17 @@ end
 local function TintSlot(slot, guid)
     if not IsObject(slot) then return end
     guid = guid or SlotGuid(slot)
+    local address = SlotAddress(slot)
+    local info = address and { guid = guid } or nil
+    if info then SlotInfo[address] = info end  -- the game has just refilled it: what it shows is looked up afresh
     local colour = guid and Wanted[guid]
     if colour then
         Paint(slot, colour, 1.0)
         Touched = true
+        if info then info.painted = colour end
     elseif Touched then
         Paint(slot, WHITE, 1.0)  -- a reused slot may still carry the tint of the item it showed before
+        if info then info.painted = WHITE end
     end
 end
 
