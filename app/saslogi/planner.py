@@ -198,6 +198,33 @@ def remaining(plan: Plan, snap: Snapshot) -> Plan:
     return Plan(stops=stops, left_behind=plan.left_behind)
 
 
+def unplanned_aboard(plan: Plan, snap: Snapshot) -> list[CargoItem]:
+    """Cargo that is on the boat and not delivered, and that no stop of the plan mentions: it came aboard after
+    the plan was made (loaded by hand, or by the crane operator under an older plan), so the plan has no line
+    for it, nothing to show and nothing to send the crane operator, until the route is worked out again."""
+    mentioned = set()
+    for stop in plan.stops:
+        for group in (stop.unload, stop.hand_in, stop.load, stop.drop):
+            mentioned.update(i.guid for i in group)
+        mentioned.update(i.guid for i, _ in stop.stage)
+        mentioned.update(stop.aboard)
+    return [i for i in snap.items if i.location == BOAT and not i.delivered and i.guid not in mentioned]
+
+
+def with_unplanned_unloads(plan: Plan, snap: Snapshot, docked: str | None) -> Plan:
+    """The plan with cargo that is on the boat for the port it is docked at, and not in the plan, added to that
+    stop's unloads: delivering it is always right, whatever the route says. Only the first stop, and only when
+    the plan is at the port the boat is in."""
+    if not plan.stops or docked is None or plan.stops[0].port != docked:
+        return plan
+    first = plan.stops[0]
+    known = {i.guid for i in first.unload}
+    extra = [i for i in unplanned_aboard(plan, snap) if i.dest == docked and i.guid not in known]
+    if not extra:
+        return plan
+    return Plan(stops=[replace(first, unload=first.unload + extra), *plan.stops[1:]], left_behind=plan.left_behind)
+
+
 @dataclass
 class LoadCheck:
     """How the boat compares, right now, with what the plan wants at the stop it is at."""

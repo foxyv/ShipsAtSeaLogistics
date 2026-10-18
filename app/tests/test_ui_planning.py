@@ -147,5 +147,26 @@ class PlanningThreadTests(unittest.TestCase):
         self.assertIn("No transactions yet", self.window.tx_summary.text())
 
 
+    # ------------------------------------------------------------------------------------------ unplanned cargo
+
+    def test_cargo_that_came_aboard_after_the_plan_is_unloaded_at_its_port_and_a_new_route_is_worked_out(self):
+        from saslogi.planner import Plan, Stop
+        self.window.snap = world(
+            [mission("m1", "B", ["g1"]), mission("m2", "B", ["g2"]), mission("m3", "C", ["g3"])],
+            [store("boatCargoArea", None, ["g1", "g2", "g3"])])
+        self.window.snap.docked_port = lambda: "Port_B"
+        items = {i.guid: i for i in self.window.snap.items}
+        self.window.committed = Plan(stops=[Stop(port="Port_B", unload=[items["g1"]]), Stop(port="Port_C")])
+        self.window.follow()
+        folder = os.path.dirname(self.window.path)
+        orders = open(os.path.join(folder, "crane_orders.txt")).read().splitlines()
+        self.assertIn("g1 U", orders)
+        self.assertIn("g2 U", orders)  # came aboard after the plan, but is for this port
+        self.assertNotIn("g3 U", orders)  # for C: left to the new route
+        self.assertTrue(self.window.planning)  # the route is worked out again for g3
+        self.wait()
+        self.assertEqual(self.window.replanned_for, frozenset({"g3"}))
+
+
 if __name__ == "__main__":
     unittest.main()

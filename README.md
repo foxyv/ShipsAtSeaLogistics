@@ -82,6 +82,12 @@ summary says which. A piece that is nowhere (consumed on delivery) stays deliver
 that is still in the hold of a contract that is over takes its room all the same, so the planner counts
 the cells as blocked, and the route summary names it.
 
+**Cargo that came aboard after the route was planned.** A piece loaded by hand (or by the crane operator under
+an older plan) has no line in the route, so nothing used to be shown or sent for it until the route was
+worked out again. Now, at each snapshot, a piece on the boat for the port it is docked at is added to that
+stop's unloads at once (so it is shown, and the crane operator is told to unload it), and any other piece the
+route does not mention makes the planner work the route out again, once for each new set of such pieces.
+
 **Transactions.** The *Transactions* tab lists the company's money movements as the game's own ledger
 records them: the date, the description the game gives (a mission paid out, a fee, a purchase) and the exact
 amount, with the balance after each, counted back from the capital the game reports. The game remembers only
