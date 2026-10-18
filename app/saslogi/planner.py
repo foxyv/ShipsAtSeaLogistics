@@ -13,7 +13,8 @@ from dataclasses import dataclass, field, replace
 
 from .model import AT_SEA, BOAT, CargoItem, Snapshot
 from .packing import Hold
-from .scoring import Weights, arrival_hours, combine, contract_share, late_share, plan_terms, scale_of
+from .scoring import (PARTIAL_CREDIT, Weights, arrival_hours, combine, contract_share, finished_by, late_share, open_value,
+                      plan_terms, scale_of)
 
 PRIORITIES = {
     "money": "Most money per km",  # the window relabels this with the chosen distance unit
@@ -119,6 +120,7 @@ class Stop:
 class Plan:
     stops: list[Stop] = field(default_factory=list)
     left_behind: int = 0  # undelivered items the plan did not reach within the stop limit
+    completed: int = 0  # contracts the plan finishes (the game pays a contract when its last piece is in)
 
     @property
     def total_km(self) -> float:
@@ -435,6 +437,9 @@ class _Route:
     empty_km: float = 0.0  # km sailed with nothing aboard
     fill_km: float = 0.0  # how full the hold was on each leg sailed, times the leg's km
     late: float = 0.0  # contracts that arrived after their deadline
+    done: frozenset = frozenset()  # guids of the cargo delivered so far
+    partial_money: float = 0.0  # worth of pieces delivered toward contracts the route has not finished (not paid yet)
+    partial_share: float = 0.0  # the same, in contracts
     positions: dict = field(default_factory=dict)  # where each item on board sits in the hold
 
     def key(self):
@@ -477,12 +482,20 @@ def _visit(snap, route, port, here, staying, chosen, load, typical_km):
     arrival = arrival_hours(snap, route.km + leg, len(route.stops))
     delivering = stop.unload + stop.hand_in
     lost = sum(late_share(snap, i, arrival) for i in delivering)
-    stop.earned = sum(i.value for i in delivering if not late_share(snap, i, arrival))
+    # The game pays a contract when its last piece is in: only the contracts this stop finishes earn anything here.
+    done = route.done | {i.guid for i in delivering}
+    finished = {m.id for m in finished_by(snap, delivering, done)}
+    paying = {i.mission.id for i in delivering if i.mission.id in finished and not late_share(snap, i, arrival)}
+    stop.earned = sum(open_value(snap).get(mid, 0.0) for mid in paying)
+    waiting_pay = [i for i in delivering if i.mission.id not in finished and not late_share(snap, i, arrival)]
+    completed = len(paying)
     return _Route(cur=port, onboard=onboard, at_port=at_port, stops=route.stops + (stop,),
                   km=route.km + leg, money=route.money + stop.earned,
                   delivered=route.delivered + len(delivering),
                   fill_sum=route.fill_sum + (stop.fill if stop.fill is not None else 1.0),
-                  contracts=route.contracts + sum(contract_share(i) for i in delivering) - lost,
+                  contracts=route.contracts + completed,
+                  done=done, partial_money=route.partial_money + sum(i.value for i in waiting_pay),
+                  partial_share=route.partial_share + sum(contract_share(i) for i in waiting_pay),
                   empty_km=route.empty_km + (leg if route.stops and not route.onboard else 0.0),
                   fill_km=route.fill_km + ((route.stops[-1].fill if route.stops[-1].fill is not None else 1.0) * leg
                                            if route.stops else 0.0),
@@ -501,8 +514,10 @@ def _objective(route, priority, typical_km, carried_credit=0.5, km_price=None, w
         # left behind (stranded) cannot be told until the route is finished, so it counts there.
         aboard = carried_credit * sum(i.value for i in route.onboard)
         terms = {
-            "contracts": (route.contracts + carried_credit * sum(contract_share(i) for i in route.onboard)) / scale.contracts,
-            "money": (route.money + aboard - (km_price or 0.0) * route.km) / scale.value,
+            "contracts": (route.contracts + PARTIAL_CREDIT * route.partial_share
+                          + carried_credit * sum(contract_share(i) for i in route.onboard)) / scale.contracts,
+            "money": (route.money + PARTIAL_CREDIT * route.partial_money + aboard
+                      - (km_price or 0.0) * route.km) / scale.value,
             "fill": route.fill_km / route.km if route.km else 0.0,
             "empty": route.empty_km / route.km if route.km else 0.0,
             "stranded": 0.0,
@@ -510,11 +525,12 @@ def _objective(route, priority, typical_km, carried_credit=0.5, km_price=None, w
         }
         return combine(weights, terms)
     if priority == "money":
-        earned = route.money + carried_credit * sum(i.value for i in route.onboard)
+        earned = route.money + PARTIAL_CREDIT * route.partial_money + carried_credit * sum(i.value for i in route.onboard)
         if km_price is not None:
             return earned - km_price * route.km
         return earned / (route.km + typical_km)
-    progress = route.delivered + carried_credit * len(route.onboard) - 0.01 * route.km / typical_km
+    progress = (route.delivered + COMPLETE_BONUS * route.contracts + carried_credit * len(route.onboard)
+                - 0.01 * route.km / typical_km)
     if priority == "stops":
         return progress
     return progress * (0.25 + route.fill_sum / max(1, len(route.stops)))
@@ -604,12 +620,34 @@ KM_PRICE_SHARE = 0.7  # of the best money-per-km rate the scout search finds
 def _plan_scorer(plans, priority, typical_km):
     """How finished plans are ranked for the "stops" and "full" priorities."""
     def progress(plan):
-        return plan.delivered - 0.01 * plan.total_km / typical_km
+        return plan.delivered + COMPLETE_BONUS * plan.completed - 0.01 * plan.total_km / typical_km
 
     if priority == "stops":
         return progress
     return lambda plan: progress(plan) * (0.25 + sum(s.fill if s.fill is not None else 1.0 for s in plan.stops)
                                           / max(1, len(plan.stops)))
+
+
+COMPLETE_BONUS = 2.0  # items' worth of progress for finishing a contract, in the "stops" and "full" priorities
+
+
+def _pay(snap, stops) -> int:
+    """Sets what each stop earns: a contract pays at the stop that delivers its last piece, if that is on time.
+    Returns how many contracts the route finishes."""
+    done: set = set()
+    km = 0.0
+    finishing = 0
+    for index, stop in enumerate(stops):
+        km += stop.leg_km or 0.0
+        delivering = stop.unload + stop.hand_in
+        done |= {i.guid for i in delivering}
+        finished = {m.id for m in finished_by(snap, delivering, done)}
+        arrival = arrival_hours(snap, km, index)
+        paid = [i for i in delivering if i.mission.id in finished and not late_share(snap, i, arrival)]
+        paying = {i.mission.id for i in paid}
+        stop.earned = sum(open_value(snap).get(mid, 0.0) for mid in paying)
+        finishing += len(paying)
+    return finishing
 
 
 STAGE_GAIN = 0.75  # staging must bring cargo to within this fraction of its present distance
@@ -724,4 +762,5 @@ def _finish(snap, route, started_with, capacity, items, positions) -> Plan:
         arriving = onboard
     plan = Plan(stops=stops)
     plan.left_behind = len(items) - plan.delivered
+    plan.completed = _pay(snap, stops)
     return plan

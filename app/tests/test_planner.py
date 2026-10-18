@@ -453,3 +453,20 @@ class PlannerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompletionPaysTests(unittest.TestCase):
+    """The game pays a contract when its last piece is delivered, so unfinished contracts earn nothing yet."""
+
+    def test_only_a_finished_contract_earns_and_it_earns_the_whole_contract(self):
+        snap = snapshot([mission("m1", "B", ["g1", "g2"])], [store("warehouse", "A", ["g1", "g2"])])
+        plan = make_plan(snap, "Port_A", Capacity(max_items=1), "full", max_stops=10)
+        self.assertEqual(plan.completed, 1)
+        self.assertEqual([s.earned for s in plan.stops if s.unload], [0.0, 100.0])  # nothing until the last piece
+        self.assertEqual(plan.total_money, 100.0)
+
+    def test_a_short_route_that_leaves_a_contract_half_done_earns_nothing_for_it(self):
+        snap = snapshot([mission("m1", "B", ["g1", "g2"])], [store("warehouse", "A", ["g1", "g2"])])
+        plan = make_plan(snap, "Port_A", Capacity(max_items=1), "full", max_stops=2)
+        self.assertEqual(plan.completed, 0)
+        self.assertEqual(plan.total_money, 0.0)

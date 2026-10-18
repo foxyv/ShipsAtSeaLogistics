@@ -759,17 +759,16 @@ class MainWindow(QMainWindow):
         with a U, what still has to come off the boat. highlight.txt is shown in the game's windows and
         crane_orders.txt is worked by the crane operator; each is left empty while its box is off.
         Cargo to take out of the warehouse to finish a contract is highlighted but not ordered.
-        Cargo the route only leaves in the warehouse (not delivered here, put off at the nearest stop), and
-        delivered pieces left in the hold, are neither marked nor ordered: a mark in the game means the
-        operator will move that piece, so a piece she will not move must not carry one. The ones the route
-        leaves are listed in removable.txt instead, for the operator to take off only if she needs the room
-        for a load. The route summary lists them."""
+        Cargo the route puts off at this stop (not delivered here, left at the nearest stop) is marked and
+        ordered off with a U like the rest, and also listed in removable.txt. Delivered pieces left in the
+        hold are neither marked nor ordered: a mark in the game means the operator will move that piece."""
         wanted, orders, removable = [], [], []
         first = plan.stops[0] if plan.stops else None
         if first and first.port == self.snap.docked_port():
-            removable = [i.guid for i in first.drop]  # the operator may take these off, only if she needs the room
+            removable = [i.guid for i in first.drop]
             wanted = [i.guid for i in first.load] + [i.guid for i, _ in first.stage]
             wanted += [f"{i.guid} U" for i in first.unload]
+            wanted += [f"{i.guid} U" for i in first.drop]  # put off here, as the route says
             orders = list(wanted)
             # The stored part of a contract being finished, and the cargo to take out of the warehouse to
             # finish one, wherever the boat is docked, is only highlighted for the player to take out. It

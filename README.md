@@ -140,10 +140,9 @@ the floor, then tallest) so that the small ones fill the gaps. `app/tests/sim_lo
 loading a hold with the real cargo footprints, and compares the planner's promise with how the crane
 operator places; `python tests/sim_loading.py orders` prints the figures.
 
-Cargo the route only "leaves in the warehouse" (not delivered at this port, put off at the stop
-nearest its destination) is neither marked in the game nor ordered: a mark means the operator will move
-that piece. It is listed in `removable.txt` instead, and the crane operator takes such cargo off the boat
-only when she cannot make room for a load by rearranging, the biggest piece first and no more than needed.
+Cargo the route "leaves in the warehouse" (not delivered at this port, put off at the stop nearest its
+destination) is ordered off the boat like any other unload (a `U` line) when the route says to put it off at the
+port you are docked in. It is also listed in `removable.txt`.
 
 The mod reads game state, restyles inventory slots and places its own markers over cargo. It never
 changes cargo, contracts, money or anything else the game saves.

@@ -65,14 +65,14 @@ def write_files(folder, highlight=True, orders=True):
 def test_the_planner_writes_what_to_load_what_to_unload_and_what_to_take_out():
     with tempfile.TemporaryDirectory() as folder:
         files = write_files(folder)
-    # The piece only left in the warehouse (4) is in neither. The piece to take out to finish a contract (5) is
+    # The piece the route puts off here (4) is ordered off with a U. The piece to take out to finish a contract (5) is
     # only highlighted: a plain line in crane_orders.txt means "load onto the boat", and the operator would
     # carry the piece the player puts on the dock for the delivery back aboard.
-    orders = f"{g('1')}\n{g('2')}\n{g('3')} U\n"
+    orders = f"{g('1')}\n{g('2')}\n{g('3')} U\n{g('4')} U\n"
     assert files["crane_orders.txt"] == orders
     assert files["highlight.txt"] == orders + f"{g('5')}\n"
     assert all(GUID_LINE.match(line) for line in (orders + g("5")).splitlines())
-    # The piece only left in the warehouse is listed separately, for the operator to take off if she needs the room.
+    # and it is listed in removable.txt as well.
     assert files["removable.txt"] == f"{g('4')}\n"
 
 
@@ -117,7 +117,7 @@ def test_the_two_programs_agree_when_run_together():
     operator = harness.load_mod(files={"SasLogistics/crane_orders.txt": files["crane_orders.txt"],
                                        "SasLogistics/removable.txt": files["removable.txt"]})
     to_load, to_unload, count = operator.test.ReadMarks()
-    assert set(to_load.keys()) == {g("1"), g("2")} and set(to_unload.keys()) == {g("3")} and count == 3
+    assert set(to_load.keys()) == {g("1"), g("2")} and set(to_unload.keys()) == {g("3"), g("4")} and count == 4
     assert set(operator.g.ReadRemovable().keys()) == {g("4")}
     # and what the operator mod writes is what the planner reads
     operator.g.MarkNoRoom(
