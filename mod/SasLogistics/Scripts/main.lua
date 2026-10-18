@@ -10,7 +10,7 @@
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.1"
+SCRIPT_VERSION = "2026-10-18.2"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -470,8 +470,8 @@ local function ExportFinance()
             local size = 0
             Try(function() Each(comp.Ledger.Transactions, function() size = size + 1 end) end, "ledger size")
             local owner = ClassName(Try(function() return comp:GetOwner() end, "finance owner")) or ""
-            -- the player's company: a player state or controller owns it; failing that, the longest ledger
-            if owner:find("Player", 1, true) then size = size + 1000000 end
+            -- the player's company (seen: owned by BP_Company_C); failing that, the longest ledger
+            if owner:find("Company", 1, true) or owner:find("Player", 1, true) then size = size + 1000000 end
             if size > bestSize then best, bestSize = comp, size end
         end
     end

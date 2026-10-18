@@ -92,7 +92,9 @@ rows shown (all of them with an empty filter), oldest first, with exact amounts 
 float) and a byte-order mark so that Excel reads the characters right. If the game's list shares nothing
 with the saved history (another save, or more transactions than the game remembers since the last look),
 the old history is set aside as `ledger.old` and a new one started, and the tab says so. This needs the
-SasLogistics mod version `2026-10-18.1` or newer, which writes the ledger into the snapshot.
+SasLogistics mod version `2026-10-18.2` or newer, which writes the ledger into the snapshot. The game keeps its
+latest 100 transactions, newest first; contract money is described as "Job Payment", and each line has a Type
+(Contract payment, Spent or Earned) for filtering.
 
 **Planning runs in the background.** A route can take several seconds to work out, so it is planned on a
 thread of its own: the window stays usable, shows a busy bar, and greys out the plan on screen until the

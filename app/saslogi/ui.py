@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from . import searoutes
 from .mapview import MapView
-from .ledger import Ledger, exact, write_csv
+from .ledger import Ledger, exact, kind, write_csv
 from .model import BOAT, Snapshot, load_snapshot, read_no_room
 from .packing import Hold
 from .planner import (
@@ -554,7 +554,7 @@ class MainWindow(QMainWindow):
         self.tx_note.setStyleSheet("color: #e5484d;")
         self.tx_note.hide()
         self.tx_filter = QLineEdit()
-        self.tx_filter.setPlaceholderText("Filter by description, date or amount…")
+        self.tx_filter.setPlaceholderText("Filter by description, type, date or amount…")
         self.tx_filter.setClearButtonEnabled(True)
         self.tx_filter.textChanged.connect(lambda *_: self._fill_transactions())
         export = QPushButton("Export CSV…")
@@ -568,7 +568,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.tx_filter, 1)
         bar.addWidget(export)
         bar.addWidget(clear)
-        self.transactions = self._table(["Date", "Description", "Amount", "Balance after"])
+        self.transactions = self._table(["Date", "Description", "Type", "Amount", "Balance after"])
         layout = QVBoxLayout()
         layout.addWidget(self.tx_summary)
         layout.addWidget(self.tx_note)
@@ -591,14 +591,15 @@ class MainWindow(QMainWindow):
         if not needle:
             return rows
         return [(e, b) for e, b in rows
-                if needle in e.description.lower() or needle in e.date or needle in exact(e.raw, unit)]
+                if needle in e.description.lower() or needle in e.date or needle in kind(e).lower()
+                or needle in exact(e.raw, unit)]
 
     def _fill_transactions(self):
         ledger, unit = self.ledger, self.ledger.unit
         shown = self._shown_transactions()
         rows = []
         for entry, balance in shown:
-            rows.append([QTableWidgetItem(entry.date), QTableWidgetItem(entry.description),
+            rows.append([QTableWidgetItem(entry.date), QTableWidgetItem(entry.description), QTableWidgetItem(kind(entry)),
                          NumberItem(entry.raw / unit, exact(entry.raw, unit, group=True)),
                          NumberItem(0 if balance is None else balance / unit,
                                     "" if balance is None else exact(balance, unit, group=True))])

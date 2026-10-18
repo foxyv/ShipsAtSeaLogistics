@@ -59,8 +59,17 @@ def exact(raw: int, unit: int, group: bool = False) -> str:
     return f"{sign}{text}" + (f".{part:0{digits}d}" if digits else "")
 
 
+def kind(entry: Entry) -> str:
+    """What sort of transaction: the game pays a finished contract as 'Job Payment'; any other line is money
+    spent (negative) or earned (selling something, say)."""
+    if entry.description.strip().lower() == "job payment":
+        return "Contract payment"
+    return "Spent" if entry.raw < 0 else "Earned"
+
+
 def parse_entries(finance: dict) -> list[Entry]:
-    """The entries of a snapshot's finance section, oldest first as the game keeps them."""
+    """The entries of a snapshot's finance section, oldest first. The game lists them newest first (seen: the
+    first is 31 August and the last 10 June), so the list is turned round unless its dates run the other way."""
     out = []
     for row in finance.get("transactions") or []:
         try:
@@ -68,7 +77,9 @@ def parse_entries(finance: dict) -> list[Entry]:
                              str(row.get("description") or "")))
         except (KeyError, TypeError, ValueError):
             continue  # a row the mod could not read all of is left out, not guessed
-    return out
+    if out and out[0].date <= out[-1].date and out[0].date != out[-1].date:
+        return out  # dates rise: already oldest first
+    return list(reversed(out))
 
 
 class Ledger:
@@ -192,8 +203,8 @@ def write_csv(path: str | os.PathLike, rows: list[tuple[Entry, int | None]], uni
     mark so that Excel reads the characters right. Returns the number of rows written."""
     with open(path, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["Date", "Description", "Amount", "Balance after"])
+        writer.writerow(["Date", "Description", "Type", "Amount", "Balance after"])
         for entry, balance in rows:
-            writer.writerow([entry.date, entry.description, exact(entry.raw, unit),
+            writer.writerow([entry.date, entry.description, kind(entry), exact(entry.raw, unit),
                              "" if balance is None else exact(balance, unit)])
     return len(rows)

@@ -85,6 +85,9 @@ not Ctrl+R. Keep the debug logging in until these are done.
   is the right one); (5) in `snapshot.json`, `finance.owner` is the player's company (a player state or
   controller), `finance.capitalRaw` over `finance.capital` is the unit (100 for hundredths), and
   `finance.historySize` is how many transactions the game remembers. Export CSV, and open it in Excel.
+  Seen so far (one real snapshot): the owner is `BP_Company_C`, the game remembers 100 transactions, the list runs
+  newest first (the planner turns it round), the unit is hundredths (capital `3 027 400.91`), the year is 1, and
+  contract money is described `Job Payment`. Not yet compared against the game's own screens.
 - [ ] **Deadlines from the game.** When an urgent contract exists (small cargo, so far), press F8 and
   look in `snapshot.json` for `deadlineTicks` on that mission and `calendar.nowTicks`. The difference,
   divided by 36,000,000,000, should be the game hours left, and match the contract's timer in the game.

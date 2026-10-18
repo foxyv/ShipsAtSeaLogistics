@@ -111,15 +111,15 @@ class PlanningThreadTests(unittest.TestCase):
 
     def shown(self):
         table = self.window.transactions
-        return [[table.item(r, c).text() for c in range(4)] for r in range(table.rowCount())]
+        return [[table.item(r, c).text() for c in range(5)] for r in range(table.rowCount())]
 
     def test_the_transactions_tab_lists_the_ledger_newest_first_with_exact_amounts(self):
         self.give_ledger([self.row(3, 1250050, "Mission completed: Fish to Fenes"), self.row(4, -30000, "Port fee")])
         self.assertEqual(self.window.tabs.tabText(self.window.tabs.indexOf(self.window.transactions.parentWidget())),
                          "Transactions")
         self.assertEqual(self.shown(), [
-            ["1820-10-04", "Port fee", "-300.00", "10 000.00"],
-            ["1820-10-03", "Mission completed: Fish to Fenes", "12 500.50", "10 300.00"],
+            ["1820-10-04", "Port fee", "Spent", "-300.00", "10 000.00"],
+            ["1820-10-03", "Mission completed: Fish to Fenes", "Earned", "12 500.50", "10 300.00"],
         ])
         self.assertIn("2 of 2 transactions", self.window.tx_summary.text())
         self.assertIn("capital now 10 000.00", self.window.tx_summary.text())
@@ -137,9 +137,9 @@ class PlanningThreadTests(unittest.TestCase):
         with mock.patch.object(self.ui.QFileDialog, "getSaveFileName", return_value=(target, "")):
             self.window.export_transactions()
         lines = open(target, encoding="utf-8-sig").read().splitlines()
-        self.assertEqual(lines[0], "Date,Description,Amount,Balance after")
-        self.assertEqual(lines[1], "1820-10-03,Mission completed: Fish to Fenes,12500.50,10300.00")
-        self.assertEqual(lines[2], "1820-10-04,Port fee,-300.00,10000.00")
+        self.assertEqual(lines[0], "Date,Description,Type,Amount,Balance after")
+        self.assertEqual(lines[1], "1820-10-03,Mission completed: Fish to Fenes,Earned,12500.50,10300.00")
+        self.assertEqual(lines[2], "1820-10-04,Port fee,Spent,-300.00,10000.00")
 
     def test_a_snapshot_without_finance_leaves_the_tab_asking_for_the_mod(self):
         self.window.snap.finance = None

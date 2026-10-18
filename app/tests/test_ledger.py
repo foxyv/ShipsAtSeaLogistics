@@ -4,7 +4,7 @@ import csv
 
 import pytest
 
-from saslogi.ledger import Entry, Ledger, exact, parse_entries, unit_from, write_csv
+from saslogi.ledger import Entry, Ledger, exact, kind, parse_entries, unit_from, write_csv
 
 
 def tx(day, raw, description="x", month=9, year=1820):
@@ -111,9 +111,9 @@ def test_the_csv_has_exact_amounts_oldest_first_and_opens_in_excel(tmp_path):
     assert count == 2
     assert out.read_bytes().startswith(b"\xef\xbb\xbf")  # the byte-order mark
     rows = list(csv.reader(out.read_text(encoding="utf-8-sig").splitlines()))
-    assert rows[0] == ["Date", "Description", "Amount", "Balance after"]
-    assert rows[1] == ["1820-10-03", "Mission completed, Fish to Fenes", "12500.50", "10300.00"]
-    assert rows[2] == ["1820-10-04", 'Port "fee"', "-300.00", "10000.00"]
+    assert rows[0] == ["Date", "Description", "Type", "Amount", "Balance after"]
+    assert rows[1] == ["1820-10-03", "Mission completed, Fish to Fenes", "Earned", "12500.50", "10300.00"]
+    assert rows[2] == ["1820-10-04", 'Port "fee"', "Spent", "-300.00", "10000.00"]
 
 
 def test_a_damaged_file_is_started_again(tmp_path):
@@ -129,3 +129,39 @@ def test_clearing_empties_the_file_too(tmp_path):
     ledger.merge(finance([tx(1, 1)]))
     ledger.clear()
     assert Ledger(path).entries == []
+
+
+def real_row(day, month, raw, description):
+    """A row as the game's own list gives them: the year is 1, and the list runs newest first."""
+    return {"day": day, "month": month, "year": 1, "raw": str(raw), "description": description}
+
+
+def test_the_games_list_runs_newest_first_and_is_turned_round():
+    rows = [real_row(31, 7, 2602600, "Job Payment"), real_row(24, 7, -9959800, "Bluefang Piercer"),
+            real_row(10, 5, 685700, "Job Payment")]
+    entries = parse_entries(finance(rows))
+    assert [e.date for e in entries] == ["0001-06-10", "0001-08-24", "0001-08-31"]  # oldest first now
+
+
+def test_a_list_that_already_runs_oldest_first_is_left_alone():
+    entries = parse_entries(finance([real_row(10, 5, 1, "a"), real_row(24, 7, 2, "b"), real_row(31, 7, 3, "c")]))
+    assert [e.raw for e in entries] == [1, 2, 3]
+
+
+def test_a_list_all_on_one_day_is_taken_as_newest_first_as_the_game_gives_it():
+    entries = parse_entries(finance([real_row(31, 7, 3, "c"), real_row(31, 7, 2, "b"), real_row(31, 7, 1, "a")]))
+    assert [e.raw for e in entries] == [1, 2, 3]
+
+
+def test_successive_looks_at_the_games_newest_first_list_grow_the_history_the_right_way():
+    ledger = Ledger()
+    ledger.merge(finance([real_row(3, 7, 30, "Job Payment"), real_row(2, 7, 20, "Fuel"), real_row(1, 7, 10, "Job Payment")]))
+    ledger.merge(finance([real_row(5, 7, 50, "Job Payment"), real_row(4, 7, -40, "Fuel"),
+                          real_row(3, 7, 30, "Job Payment"), real_row(2, 7, 20, "Fuel")]))
+    assert [e.raw for e in ledger.entries] == [10, 20, 30, -40, 50]  # oldest first, nothing twice
+
+
+def test_kinds_name_the_game_s_job_payments():
+    assert kind(Entry(1, 8, 31, 2602600, "Job Payment")) == "Contract payment"
+    assert kind(Entry(1, 8, 24, -9959800, "Bluefang Piercer")) == "Spent"
+    assert kind(Entry(1, 8, 24, 34900, "Circuit Breaker")) == "Earned"
