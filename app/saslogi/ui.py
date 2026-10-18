@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from . import searoutes
 from .mapview import MapView
+from .audit import Audit, counts_of, items_of, plan_of
 from .ledger import Ledger, exact, kind, write_csv
 from .model import BOAT, Snapshot, load_snapshot, read_no_room
 from .packing import Hold
@@ -58,6 +59,12 @@ DISTANCE_UNITS = {
     "nm": ("Nautical miles (nm)", 1.852),
     "mi": ("Miles (mi)", 1.609344),
 }
+
+
+def default_audit_path() -> str:
+    """Where the planner writes its audit log: every plan it works out, and every change in the orders sent."""
+    base = os.environ.get("APPDATA") or str(Path.home())
+    return str(Path(base) / "SasLogistics" / "audit.jsonl")
 
 
 def default_ledger_path() -> str:
@@ -131,13 +138,16 @@ class PlanRunner(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: QSettings | None = None, path: str | None = None, ledger_path: str | None = None):
+    def __init__(self, settings: QSettings | None = None, path: str | None = None, ledger_path: str | None = None,
+                 audit_path: str | None = None):
         super().__init__()
         self.setWindowTitle("Ships At Sea Logistics")
         self.resize(1150, 720)
         self.settings = settings or QSettings("SasLogistics", "Planner")  # tests pass settings of their own
         self.path = path or self.settings.value("snapshotPath", default_snapshot_path())
         self.snap = Snapshot()
+        self.audit = Audit(audit_path or default_audit_path())  # what the planner decided, line by line
+        self.plan_cause = ""  # why the next route is being worked out, for the audit log
         self.ledger = Ledger(ledger_path or default_ledger_path())  # transactions, kept beyond what the game remembers
         self.mtime = None
         self.sea_km: dict = {}  # (port, port) -> km by sea; empty until sea routes are known
@@ -154,6 +164,7 @@ class MainWindow(QMainWindow):
         sys.setswitchinterval(0.002)  # a busy planner thread must not make the window sluggish
         self.committed = None  # the plan being followed; it is kept until something calls for a new one
         self.strays = []  # cargo on the boat that the route being followed does not mention
+        self.replan_reason, self.replan_reason_at = "", ""  # why the route last changed by itself
         self.committed_at = ""
         self.known_cargo: set[str] = set()  # cargo that existed when that plan was made
 
@@ -316,9 +327,13 @@ class MainWindow(QMainWindow):
         form.addRow(self.crane_orders)
         self.plan_summary = QLabel()
         self.plan_summary.setWordWrap(True)
+        audit_button = QPushButton("Open the audit log")
+        audit_button.setToolTip("Every route the planner works out, what made it, and every change in the orders "
+                                "sent to the crane operator, one line each.")
+        audit_button.clicked.connect(self.open_audit)
         replan_button = QPushButton("Replan from here")
         replan_button.setToolTip("Throw the current route away and plan a new one from the latest snapshot.")
-        replan_button.clicked.connect(self.replan)
+        replan_button.clicked.connect(self.replan_by_hand)
         check_button = QPushButton("Check load now")
         check_button.setToolTip("Asks the game for a fresh snapshot and compares the boat with this stop's instructions.")
         check_button.clicked.connect(self.request_snapshot)
@@ -329,6 +344,7 @@ class MainWindow(QMainWindow):
         side.addWidget(check_button)
         side.addWidget(self.load_check)
         side.addWidget(replan_button)
+        side.addWidget(audit_button)
         side.addWidget(self.plan_summary)
         side.addStretch(1)
 
@@ -491,8 +507,10 @@ class MainWindow(QMainWindow):
         # that changes (it is cleared once the hold has changed and the pieces may fit).
         reported = read_no_room(self.path)
         if reported != self.no_room:
+            self.audit.record("no room reported", pieces=sorted(reported))
             self.no_room = reported
             if self.committed is not None:
+                self.plan_cause = "the crane operator reported cargo that does not fit the hold"
                 self.replan_timer.start()
         try:
             mtime = os.path.getmtime(self.path)
@@ -689,6 +707,13 @@ class MainWindow(QMainWindow):
                 wanted += [i.guid for i in stored]
         for mission in self.snap.completable_at(self.snap.docked_port()):
             wanted += [i.guid for i in mission.to_take_out]
+        names = {i.guid: i.name for i in self.snap.items}
+        label = lambda lines: [f"{line.split()[0][:8]} {names.get(line.split()[0], '?')}" + (" UNLOAD" if " U" in line else "")
+                               for line in lines]  # noqa: E731
+        self.audit.record_if_changed(
+            "orders", port=first.port if first else None, docked=self.snap.docked_port(),
+            highlight=label(wanted), crane_orders=label(orders) if self.crane_orders.isChecked() else "off",
+            removable=label(removable) if self.crane_orders.isChecked() else "off")
         for name, on, guids in (("highlight.txt", self.highlight.isChecked(), wanted),
                                 ("crane_orders.txt", self.crane_orders.isChecked(), orders),
                                 ("removable.txt", self.crane_orders.isChecked(), removable)):
@@ -742,6 +767,23 @@ class MainWindow(QMainWindow):
         self._fill(self.matrix, rows)
         self.matrix.sortItems(0)
 
+    def open_audit(self):
+        path = self.audit.path
+        if not path or not path.is_file():
+            QMessageBox.information(self, "Audit log", "Nothing has been logged yet.")
+            return
+        if hasattr(os, "startfile"):
+            os.startfile(str(path))  # noqa: S606
+        else:
+            self.status.setText(f"Audit log: {path}")
+
+    def replan_by_hand(self):
+        """Replan from here: the route is the player's own asking, so the note about a route that changed by
+        itself no longer applies."""
+        self.replan_reason = ""
+        self.plan_cause = "Replan from here was pressed"
+        self.replan()
+
     def replan(self):
         for key, widget in (("maxWeight", self.max_weight), ("maxItems", self.max_items), ("maxStops", self.max_stops)):
             self.settings.setValue(key, widget.value())
@@ -772,6 +814,13 @@ class MainWindow(QMainWindow):
         self.plan_job = {"snap": copy.copy(snap), "start": start, "capacity": capacity,
                          "priority": self.priority.currentData(), "max_stops": self.max_stops.value(),
                          "no_room": self.no_room, "weights": self.weights()}
+        self.plan_job["cause"] = self.plan_cause or "a setting or the start port changed"
+        self.plan_cause = ""
+        self.plan_job["settings"] = {
+            "priority": self.priority.currentData(), "max_stops": self.max_stops.value(),
+            "max_weight": self.max_weight.value(), "max_items": self.max_items.value(),
+            "use_hold": self.use_hold.isChecked(), "stacking": self.stacking.isChecked(),
+            "no_splits": self.no_splits.isChecked(), "weights": self.weights().as_dict() if self.weights() else None}
         self.planning = True
         self.busy.show()
         self.plan_tree.setEnabled(False)  # the plan on screen is the old one: greyed until the new one is in
@@ -790,6 +839,11 @@ class MainWindow(QMainWindow):
             self.plan_summary.setText(f"Planning failed: {error}")
             return
         snap = job["snap"]
+        self.audit.record(
+            "plan", cause=job.get("cause", ""), snapshot=snap.time, start=job["start"], boat=snap.boat_name,
+            docked=snap.docked_port(), aboard=len([i for i in snap.items if i.location == BOAT]),
+            settings=job.get("settings"), no_room=sorted(job.get("no_room") or []), summary=counts_of(plan),
+            **plan_of(plan, snap))
         self.committed = plan
         self.committed_at = snap.time[11:16]
         self.sea_note = self.sea_note.split(" The route on screen")[0]
@@ -843,6 +897,17 @@ class MainWindow(QMainWindow):
         plan = advance(self.committed, self.snap.docked_port()) if self.committed else None
         view = remaining(plan, self.snap) if plan else None
         if view is None or not has_work(view):
+            # Said in the route summary and the window's status line, so that a route that changes by itself is
+            # never a surprise: what made it, and when.
+            if not self.committed:
+                self.replan_reason = "there was no route yet"
+            elif plan is None:
+                self.replan_reason = (f"the boat is docked at {self.snap.port_name(self.snap.docked_port())}, "
+                                      "which the route did not go to")
+            else:
+                self.replan_reason = "all the work the route had left was done"
+            self.replan_reason_at = time.strftime("%H:%M:%S")
+            self.plan_cause = "automatic: " + self.replan_reason
             self.replan()
             return
         # Cargo that came aboard after the route was planned has no line in it. What is for the port the boat is
@@ -851,6 +916,7 @@ class MainWindow(QMainWindow):
         # pieces would be moved back and forth. The rest is pointed out, and Replan from here includes it.
         view = with_unplanned_unloads(view, self.snap, self.snap.docked_port())
         self.strays = sorted(unplanned_aboard(view, self.snap), key=lambda i: i.name)
+        self.audit.record_if_changed("aboard but not in the route", pieces=items_of(self.strays))
         self.committed = plan
         self.show_plan(view)
 
@@ -982,5 +1048,8 @@ class MainWindow(QMainWindow):
         else:
             lines.append("No hold found for your boat in the snapshot, so space is not checked.")
         lines.append(self.sea_note)
+        if self.replan_reason:
+            lines.append(f"This route was worked out again by itself at {self.replan_reason_at} because "
+                         f"{self.replan_reason}.")
         lines.append("Item counts in the Stop rows are what is on board when leaving.")
         self.plan_summary.setText("\n\n".join(lines))

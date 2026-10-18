@@ -88,7 +88,17 @@ worked out again. Now, at each snapshot, a piece on the boat for the port it is 
 stop's unloads at once (so it is shown, and the crane operator is told to unload it). Any other piece the route
 does not mention is pointed out on the first stop ("Aboard, but not in this route"); the route itself is never
 changed behind your back, because a new route replaces the orders the operator is carrying out and pieces are
-moved back and forth. Press *Replan from here* to include them.
+moved back and forth. Press *Replan from here* to include them. When the plan does change by itself (there was
+no route, the boat docked somewhere the route does not go, or all the work it had left was done), the route
+summary says so and why.
+
+**Audit log.** Every route the planner works out is written to `%APPDATA%\SasLogistics\audit.jsonl`, one JSON
+line each: what made it (a setting, the Replan button, the crane operator reporting cargo that does not fit,
+or an automatic replan and its reason), the snapshot it was made from, the settings, and every stop with each
+piece to unload, hand in, load, drop or stage by name and id. A line is also written when the orders sent to
+the crane operator and the highlights in the game change, and when cargo is aboard that the route does not
+mention. *Open the audit log* in the Route tab opens it. At 200 MB the file rolls over to `audit.1.jsonl` (older
+ones move up to `.2` and `.3`, and the oldest is deleted), so it never takes more than about 800 MB.
 
 **Transactions.** The *Transactions* tab lists the company's money movements as the game's own ledger
 records them: the date, the description the game gives (a mission paid out, a fee, a purchase) and the exact

@@ -21,6 +21,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from saslogi.audit import Audit  # noqa: E402
 from saslogi.model import read_no_room  # noqa: E402
 from saslogi.planner import Plan, Stop  # noqa: E402
 from tests.lua_harness import load_mod  # noqa: E402
@@ -55,7 +56,7 @@ def write_files(folder, highlight=True, orders=True):
     item = {i.guid: i for i in snap.items}
     stop = Stop(port="Port_A", load=[item[g("1")]], stage=[(item[g("2")], "Port_B")], unload=[item[g("3")]],
                 drop=[item[g("4")]])
-    me = SimpleNamespace(snap=snap, path=str(Path(folder) / "snapshot.json"),
+    me = SimpleNamespace(snap=snap, path=str(Path(folder) / "snapshot.json"), audit=Audit(),
                          highlight=Checkbox(highlight), crane_orders=Checkbox(orders))
     ui.MainWindow._write_highlights(me, Plan(stops=[stop]))
     return {name: (Path(folder) / name).read_text() for name in ("highlight.txt", "crane_orders.txt", "removable.txt")}

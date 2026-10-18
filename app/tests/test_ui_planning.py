@@ -33,7 +33,8 @@ class PlanningThreadTests(unittest.TestCase):
         self.ui = ui
         self.window = ui.MainWindow(QSettings(os.path.join(self.settings_dir.name, "planner.ini"), QSettings.IniFormat),
                                     path=os.path.join(self.settings_dir.name, "no snapshot here.json"),
-                                    ledger_path=os.path.join(self.settings_dir.name, "ledger.json"))
+                                    ledger_path=os.path.join(self.settings_dir.name, "ledger.json"),
+                                    audit_path=os.path.join(self.settings_dir.name, "audit.jsonl"))
         self.window.snap = world([mission("m1", "B", ["g1"]), mission("m2", "C", ["g2"])],
                                  [store("warehouse", "A", ["g1", "g2"])])
         self.window.start_port.addItem("A", "Port_A")
@@ -170,6 +171,21 @@ class PlanningThreadTests(unittest.TestCase):
         first = self.window.plan_tree.topLevelItem(0)
         notes = [first.child(n).text(0) for n in range(first.childCount())]
         self.assertTrue(any("not in this route" in text for text in notes))
+
+
+    def test_a_route_that_changes_by_itself_says_why_and_a_route_asked_for_does_not(self):
+        from saslogi.planner import Plan, Stop
+        self.window.snap = world([mission("m1", "B", ["g1"])], [store("warehouse", "A", ["g1"])])
+        self.window.start_port.addItem("A", "Port_A")
+        # the route had one stop, whose work is all done by now: a new route is made, and the summary says why
+        self.window.committed = Plan(stops=[Stop(port="Port_A", unload=[]), Stop(port="Port_B")])
+        self.window.follow()
+        self.wait()
+        self.assertIn("worked out again by itself", self.window.plan_summary.text())
+        self.assertIn("all the work the route had left was done", self.window.plan_summary.text())
+        self.window.replan_by_hand()
+        self.wait()
+        self.assertNotIn("worked out again by itself", self.window.plan_summary.text())
 
 
 if __name__ == "__main__":
