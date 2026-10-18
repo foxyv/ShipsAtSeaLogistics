@@ -1,6 +1,7 @@
 """The ledger: the game's list of transactions merged into a history the planner keeps, exact amounts, CSV."""
 
 import csv
+import json
 
 import pytest
 
@@ -165,3 +166,41 @@ def test_kinds_name_the_game_s_job_payments():
     assert kind(Entry(1, 8, 31, 2602600, "Job Payment")) == "Contract payment"
     assert kind(Entry(1, 8, 24, -9959800, "Bluefang Piercer")) == "Spent"
     assert kind(Entry(1, 8, 24, 34900, "Circuit Breaker")) == "Earned"
+
+
+def test_a_file_written_by_the_first_version_newest_first_is_set_aside_and_read_again(tmp_path):
+    path = tmp_path / "ledger.json"
+    # what the first version saved: no format marker, and the entries newest first
+    path.write_text(json.dumps({"unit": 100, "capital_raw": 500, "entries": [
+        [1, 8, 31, "300", "Job Payment"], [1, 8, 24, "200", "Fuel"], [1, 6, 10, "100", "Job Payment"]]}))
+    ledger = Ledger(path)
+    assert ledger.entries == [] and "wrong order" in ledger.note
+    assert (tmp_path / "ledger.old").is_file()
+    ledger.merge(finance([real_row(31, 7, 300, "Job Payment"), real_row(24, 7, 200, "Fuel"), real_row(10, 5, 100, "Job Payment")]))
+    assert [e.date for e in ledger.entries] == ["0001-06-10", "0001-08-24", "0001-08-31"]  # oldest first now
+
+
+def test_the_ledger_is_saved_with_its_format_and_loaded_back_unchanged(tmp_path):
+    path = tmp_path / "ledger.json"
+    ledger = Ledger(path)
+    ledger.merge(finance([real_row(3, 7, 30, "a"), real_row(2, 7, 20, "b"), real_row(1, 7, 10, "c")]))
+    assert json.loads(path.read_text())["format"] == 2
+    assert [e.raw for e in Ledger(path).entries] == [10, 20, 30]
+
+
+def test_a_saved_history_whose_dates_do_not_rise_is_not_trusted(tmp_path):
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps({"format": 2, "unit": 100, "capital_raw": 1, "entries": [
+        [1, 8, 31, "1", "a"], [1, 6, 10, "2", "b"]]}))
+    assert Ledger(path).entries == []
+
+
+def test_the_stale_file_that_was_glued_to_a_correct_window_does_not_happen_again(tmp_path):
+    """The real case: a newest-first history, then the right-way-round window. It must not become 199 jumbled rows."""
+    path = tmp_path / "ledger.json"
+    old = [[1, 8, 31, "3", "a"], [1, 8, 24, "2", "b"], [1, 6, 10, "1", "c"]]
+    path.write_text(json.dumps({"unit": 100, "capital_raw": 9, "entries": old}))
+    ledger = Ledger(path)
+    ledger.merge(finance([real_row(31, 7, 3, "a"), real_row(24, 7, 2, "b"), real_row(10, 5, 1, "c")]))
+    dates = [e.date for e in ledger.entries]
+    assert len(dates) == 3 and dates == sorted(dates)

@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+FORMAT = 2   # 1 stored the entries newest first (a mistake); 2 stores them oldest first
 UNITS = (1, 10, 100, 1000, 10_000, 100_000)
 DEFAULT_UNIT = 100
 
@@ -99,7 +100,19 @@ class Ledger:
             return
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            self.entries = [Entry.from_json(row) for row in data.get("entries", [])]
+            entries = [Entry.from_json(row) for row in data.get("entries", [])]
+            dates = [e.date for e in entries]
+            if data.get("format") != FORMAT or dates != sorted(dates):
+                # A file from before the order was right, or one whose dates do not rise: it is not trusted. It is
+                # set aside, and the game's own list fills a new one.
+                self.note = ("The saved history was in the wrong order (an earlier version of the planner wrote it), so "
+                             "it was set aside as ledger.old and the game's recent transactions were read again.")
+                try:
+                    os.replace(self.path, self.path.with_suffix(".old"))
+                except OSError:
+                    pass
+                return
+            self.entries = entries
             self.unit = int(data.get("unit") or DEFAULT_UNIT)
             self.capital_raw = int(data["capital_raw"]) if data.get("capital_raw") is not None else None
         except (OSError, ValueError, KeyError, TypeError, IndexError):
@@ -111,7 +124,7 @@ class Ledger:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"unit": self.unit, "capital_raw": self.capital_raw,
+            tmp.write_text(json.dumps({"format": FORMAT, "unit": self.unit, "capital_raw": self.capital_raw,
                                        "entries": [e.to_json() for e in self.entries]}), encoding="utf-8")
             os.replace(tmp, self.path)
         except OSError:
@@ -154,9 +167,13 @@ class Ledger:
             tail = self.entries[start:]
             if window[:len(tail)] == tail:
                 added = window[len(tail):]
-                self.entries += added
-                self.save()
-                return len(added)
+                merged = self.entries + added
+                dates = [e.date for e in merged]
+                if dates == sorted(dates):
+                    self.entries = merged
+                    self.save()
+                    return len(added)
+                break  # the dates would not rise: not a real overlap, so start again below
         # no overlap
         self.note = ("The game's list of transactions and the saved history have nothing in common (another save, or "
                      "more transactions than the game remembers since the last look): the old history was set aside "

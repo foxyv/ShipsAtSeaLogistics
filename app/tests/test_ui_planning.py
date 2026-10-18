@@ -34,12 +34,17 @@ class PlanningThreadTests(unittest.TestCase):
         self.window = ui.MainWindow(QSettings(os.path.join(self.settings_dir.name, "planner.ini"), QSettings.IniFormat),
                                     path=os.path.join(self.settings_dir.name, "no snapshot here.json"),
                                     ledger_path=os.path.join(self.settings_dir.name, "ledger.json"),
-                                    audit_path=os.path.join(self.settings_dir.name, "audit.jsonl"))
+                                    audit_path=os.path.join(self.settings_dir.name, "audit.jsonl"),
+                                    plan_in_process=False)
         self.window.snap = world([mission("m1", "B", ["g1"]), mission("m2", "C", ["g2"])],
                                  [store("warehouse", "A", ["g1", "g2"])])
         self.window.start_port.addItem("A", "Port_A")
 
     def tearDown(self):
+        # Nothing of this window may run on into the next test: its timers would start a plan of their own while the
+        # next test counts the plans it asked for.
+        self.window.timer.stop()
+        self.window.replan_timer.stop()
         self.wait()
         self.window.close()
 

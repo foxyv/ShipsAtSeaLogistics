@@ -114,9 +114,12 @@ SasLogistics mod version `2026-10-18.2` or newer, which writes the ledger into t
 latest 100 transactions, newest first; contract money is described as "Job Payment", and each line has a Type
 (Contract payment, Spent or Earned) for filtering.
 
-**Planning runs in the background.** A route can take several seconds to work out, so it is planned on a
-thread of its own: the window stays usable, shows a busy bar, and greys out the plan on screen until the
-new one is ready. A setting changed meanwhile plans once more with the latest settings.
+**Planning runs in the background.** A route can take several seconds to work out (six seconds of pure
+computation on a big job), so it is planned in a worker process of its own: the window stays usable, shows a busy
+bar, and greys out the plan on screen until the new one is ready. (It used to run on a thread of the window's
+process, and the interpreter's lock made every small call the window made wait for it, which froze the window for
+4 to 5 seconds at every snapshot.) A setting changed meanwhile plans once more with the latest settings. The worker
+ends with the window.
 
 **Weighted score.** Besides the three fixed priorities, "Weighted score" ranks plans by six adjustable
 weights (with presets): contracts completed, money (NOK per km), hold usage, empty legs, stranded cargo

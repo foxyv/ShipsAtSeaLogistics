@@ -26,7 +26,7 @@ from .model import BOAT, Snapshot, load_snapshot, read_no_room
 from .packing import Hold
 from .planner import (
     PRIORITIES, Capacity, advance, check_load, completing_unloads, has_work, make_plan, remaining,
-    unplanned_aboard, with_unplanned_unloads,
+    unplanned_aboard, with_unplanned_unloads, worker_loop,
     waiting_by_contract,
 )
 from .scoring import PRESETS, Weights
@@ -120,12 +120,68 @@ def summarise(items, width: int = 70) -> str:
 
 
 class PlanRunner(QObject):
-    """Plans a route on a thread of its own. `finished` is emitted back on the window's thread with the
-    plan, or with the error that stopped the search."""
+    """Plans a route in a worker process of its own (or, with in_process=False, on a thread, as the tests do so that
+    they can watch the planner). `finished` is emitted back with the plan, or with the error that stopped the
+    search. One job at a time. The worker is started the first time and kept for the next, and is ended with the
+    window."""
 
     finished = Signal(object, object)
 
+    def __init__(self, in_process: bool = True):
+        super().__init__()
+        self.in_process = in_process
+        self._process = None
+        self._conn = None
+
+    def _worker(self):
+        """The pipe to a running worker, starting one if there is none (or it died)."""
+        if self._process is not None and self._process.is_alive():
+            return self._conn
+        self.stop()
+        import multiprocessing
+        context = multiprocessing.get_context("spawn")
+        mine, theirs = context.Pipe()
+        process = context.Process(target=worker_loop, args=(theirs,), name="route planner", daemon=True)
+        process.start()
+        theirs.close()
+        self._process, self._conn = process, mine
+        return mine
+
+    def stop(self):
+        process, conn, self._process, self._conn = self._process, self._conn, None, None
+        for closer in (lambda: conn and conn.close(), lambda: process and process.terminate()):
+            try:
+                closer()
+            except Exception:
+                pass
+
     def run(self, job):
+        if self.in_process:
+            try:
+                conn = self._worker()
+                conn.send({key: job[key] for key in ("snap", "start", "capacity", "priority", "max_stops", "no_room", "weights")})
+            except Exception:  # no worker could be started: plan on a thread, as before
+                self.stop()
+                self._thread(job)
+                return
+            threading.Thread(target=self._wait, args=(conn,), name="route planner wait", daemon=True).start()
+        else:
+            self._thread(job)
+
+    def _wait(self, conn):
+        """Waits for the worker's answer (a blocked read lets go of the interpreter lock, so it costs the window nothing)."""
+        try:
+            kind, value = conn.recv()
+        except (EOFError, OSError):
+            self.stop()
+            self.finished.emit(None, RuntimeError("the route planner process stopped"))
+            return
+        if kind == "ok":
+            self.finished.emit(value, None)
+        else:
+            self.finished.emit(None, value)
+
+    def _thread(self, job):
         def work():
             try:
                 plan = make_plan(job["snap"], job["start"], job["capacity"], job["priority"], job["max_stops"],
@@ -139,13 +195,14 @@ class PlanRunner(QObject):
 
 class MainWindow(QMainWindow):
     def __init__(self, settings: QSettings | None = None, path: str | None = None, ledger_path: str | None = None,
-                 audit_path: str | None = None):
+                 audit_path: str | None = None, plan_in_process: bool = True):
         super().__init__()
         self.setWindowTitle("Ships At Sea Logistics")
         self.resize(1150, 720)
         self.settings = settings or QSettings("SasLogistics", "Planner")  # tests pass settings of their own
         self.path = path or self.settings.value("snapshotPath", default_snapshot_path())
         self.snap = Snapshot()
+        self._filled: dict[int, list] = {}  # table id -> the text it was last filled with
         self.audit = Audit(audit_path or default_audit_path())  # what the planner decided, line by line
         self.plan_cause = ""  # why the next route is being worked out, for the audit log
         self.ledger = Ledger(ledger_path or default_ledger_path())  # transactions, kept beyond what the game remembers
@@ -159,7 +216,7 @@ class MainWindow(QMainWindow):
         self.planning = False  # a route is being worked out on the planner thread
         self.plan_again = False  # something changed meanwhile, so plan again when it finishes
         self.plan_job = None
-        self.runner = PlanRunner()
+        self.runner = PlanRunner(plan_in_process)
         self.runner.finished.connect(self._planned)
         sys.setswitchinterval(0.002)  # a busy planner thread must not make the window sluggish
         self.committed = None  # the plan being followed; it is kept until something calls for a new one
@@ -661,12 +718,27 @@ class MainWindow(QMainWindow):
             self._update_transactions()
 
     def _fill(self, table, rows):
-        table.setSortingEnabled(False)
-        table.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            for c, cell in enumerate(row):
-                table.setItem(r, c, cell if isinstance(cell, QTableWidgetItem) else QTableWidgetItem(str(cell)))
-        table.setSortingEnabled(True)
+        """Fills a table, quickly. A table whose columns resize to their contents measures every row at every
+        setItem, so filling a few hundred cells took seconds (the planner froze for 4 to 5 s at every snapshot).
+        The columns are fixed while it fills and fitted once at the end, with updates off. A table whose text is
+        what it was is left alone."""
+        signature = [[cell.text() if isinstance(cell, QTableWidgetItem) else str(cell) for cell in row] for row in rows]
+        if self._filled.get(id(table)) == signature:
+            return
+        self._filled[id(table)] = signature
+        header = table.horizontalHeader()
+        table.setUpdatesEnabled(False)
+        header.setSectionResizeMode(QHeaderView.Fixed)
+        try:
+            table.setSortingEnabled(False)
+            table.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                for c, cell in enumerate(row):
+                    table.setItem(r, c, cell if isinstance(cell, QTableWidgetItem) else QTableWidgetItem(str(cell)))
+            table.setSortingEnabled(True)
+        finally:
+            header.setSectionResizeMode(QHeaderView.ResizeToContents)
+            table.setUpdatesEnabled(True)
 
     def _fill_contracts(self):
         snap, rows = self.snap, []
@@ -766,6 +838,10 @@ class MainWindow(QMainWindow):
             ])
         self._fill(self.matrix, rows)
         self.matrix.sortItems(0)
+
+    def closeEvent(self, event):
+        self.runner.stop()  # the planner's worker process ends with the window
+        super().closeEvent(event)
 
     def open_audit(self):
         path = self.audit.path

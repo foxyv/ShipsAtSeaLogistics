@@ -225,6 +225,31 @@ def with_unplanned_unloads(plan: Plan, snap: Snapshot, docked: str | None) -> Pl
     return Plan(stops=[replace(first, unload=first.unload + extra), *plan.stops[1:]], left_behind=plan.left_behind)
 
 
+def plan_job(job: dict) -> Plan:
+    """Works out a route from a job as the window describes it (see MainWindow.replan)."""
+    return make_plan(job["snap"], job["start"], job["capacity"], job["priority"], job["max_stops"],
+                     no_room=job["no_room"], weights=job["weights"])
+
+
+def worker_loop(conn) -> None:
+    """The planner's worker process: takes a job from the pipe, sends back ("ok", plan) or ("error", why), and
+    waits for the next. It runs until the pipe is closed. Planning is six seconds of pure computation; on a thread
+    of the window's own process it held the interpreter's lock, and every small call the window made while it ran
+    had to wait for it, which froze the window for seconds. In a process of its own it takes nothing from the window."""
+    while True:
+        try:
+            job = conn.recv()
+        except (EOFError, OSError):
+            return
+        try:
+            conn.send(("ok", plan_job(job)))
+        except Exception as error:  # reported to the window, which must not stop: the next job is still taken
+            try:
+                conn.send(("error", error))
+            except Exception:
+                conn.send(("error", RuntimeError(str(error))))
+
+
 @dataclass
 class LoadCheck:
     """How the boat compares, right now, with what the plan wants at the stop it is at."""
