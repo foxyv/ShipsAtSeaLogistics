@@ -32,7 +32,8 @@ class PlanningThreadTests(unittest.TestCase):
         from saslogi import ui
         self.ui = ui
         self.window = ui.MainWindow(QSettings(os.path.join(self.settings_dir.name, "planner.ini"), QSettings.IniFormat),
-                                    path=os.path.join(self.settings_dir.name, "no snapshot here.json"))
+                                    path=os.path.join(self.settings_dir.name, "no snapshot here.json"),
+                                    ledger_path=os.path.join(self.settings_dir.name, "ledger.json"))
         self.window.snap = world([mission("m1", "B", ["g1"]), mission("m2", "C", ["g2"])],
                                  [store("warehouse", "A", ["g1", "g2"])])
         self.window.start_port.addItem("A", "Port_A")
@@ -95,6 +96,55 @@ class PlanningThreadTests(unittest.TestCase):
         QTest.qWait(50)
         # Small enough, the controls are taller than the room they have and can be scrolled.
         self.assertGreater(controls.verticalScrollBar().maximum(), 0)
+
+
+    # ------------------------------------------------------------------------------------------ transactions
+
+    def give_ledger(self, rows, capital_raw=1000000):
+        self.window.snap.finance = {"transactions": rows, "capitalRaw": str(capital_raw), "capital": capital_raw / 100,
+                                    "historySize": 100}
+        self.window._update_transactions()
+
+    @staticmethod
+    def row(day, raw, description):
+        return {"day": day, "month": 9, "year": 1820, "raw": str(raw), "description": description}
+
+    def shown(self):
+        table = self.window.transactions
+        return [[table.item(r, c).text() for c in range(4)] for r in range(table.rowCount())]
+
+    def test_the_transactions_tab_lists_the_ledger_newest_first_with_exact_amounts(self):
+        self.give_ledger([self.row(3, 1250050, "Mission completed: Fish to Fenes"), self.row(4, -30000, "Port fee")])
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.indexOf(self.window.transactions.parentWidget())),
+                         "Transactions")
+        self.assertEqual(self.shown(), [
+            ["1820-10-04", "Port fee", "-300.00", "10 000.00"],
+            ["1820-10-03", "Mission completed: Fish to Fenes", "12 500.50", "10 300.00"],
+        ])
+        self.assertIn("2 of 2 transactions", self.window.tx_summary.text())
+        self.assertIn("capital now 10 000.00", self.window.tx_summary.text())
+
+    def test_the_filter_narrows_the_list_and_the_summary(self):
+        self.give_ledger([self.row(3, 1250050, "Mission completed: Fish to Fenes"), self.row(4, -30000, "Port fee")])
+        self.window.tx_filter.setText("mission")
+        self.assertEqual([r[1] for r in self.shown()], ["Mission completed: Fish to Fenes"])
+        self.assertIn("1 of 2 transactions", self.window.tx_summary.text())
+
+    def test_exporting_writes_the_shown_rows_oldest_first(self):
+        from unittest import mock
+        self.give_ledger([self.row(3, 1250050, "Mission completed: Fish to Fenes"), self.row(4, -30000, "Port fee")])
+        target = os.path.join(self.settings_dir.name, "out.csv")
+        with mock.patch.object(self.ui.QFileDialog, "getSaveFileName", return_value=(target, "")):
+            self.window.export_transactions()
+        lines = open(target, encoding="utf-8-sig").read().splitlines()
+        self.assertEqual(lines[0], "Date,Description,Amount,Balance after")
+        self.assertEqual(lines[1], "1820-10-03,Mission completed: Fish to Fenes,12500.50,10300.00")
+        self.assertEqual(lines[2], "1820-10-04,Port fee,-300.00,10000.00")
+
+    def test_a_snapshot_without_finance_leaves_the_tab_asking_for_the_mod(self):
+        self.window.snap.finance = None
+        self.window._update_transactions()
+        self.assertIn("No transactions yet", self.window.tx_summary.text())
 
 
 if __name__ == "__main__":

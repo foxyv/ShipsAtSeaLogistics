@@ -82,6 +82,18 @@ summary says which. A piece that is nowhere (consumed on delivery) stays deliver
 that is still in the hold of a contract that is over takes its room all the same, so the planner counts
 the cells as blocked, and the route summary names it.
 
+**Transactions.** The *Transactions* tab lists the company's money movements as the game's own ledger
+records them: the date, the description the game gives (a mission paid out, a fee, a purchase) and the exact
+amount, with the balance after each, counted back from the capital the game reports. The game remembers only
+its most recent transactions, so the planner keeps the history itself in `%APPDATA%\SasLogistics\ledger.json`
+and adds what is new at every snapshot; the history grows past the game's limit from the day you start using
+it (it cannot go back before it). The box filters by description, date or amount, and *Export CSV…* saves the
+rows shown (all of them with an empty filter), oldest first, with exact amounts (`12500.50`, never a rounded
+float) and a byte-order mark so that Excel reads the characters right. If the game's list shares nothing
+with the saved history (another save, or more transactions than the game remembers since the last look),
+the old history is set aside as `ledger.old` and a new one started, and the tab says so. This needs the
+SasLogistics mod version `2026-10-18.1` or newer, which writes the ledger into the snapshot.
+
 **Planning runs in the background.** A route can take several seconds to work out, so it is planned on a
 thread of its own: the window stays usable, shows a busy bar, and greys out the plan on screen until the
 new one is ready. A setting changed meanwhile plans once more with the latest settings.

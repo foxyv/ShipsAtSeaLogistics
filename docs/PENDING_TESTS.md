@@ -77,6 +77,14 @@ not Ctrl+R. Keep the debug logging in until these are done.
 
 ## ShipsAtSeaLogistics
 
+- [ ] **The Transactions tab, with the real ledger.** Load a save, press F8 in game, and open the
+  Transactions tab. Check against the game: (1) the capital shown ("capital now ...") is the money the game
+  shows, with the same decimals; (2) the newest rows are the ones you just made (complete a delivery and buy
+  something, press F8 again, and they appear); (3) the descriptions are the game's own wording, and the
+  amounts have the right sign (money in is positive); (4) the dates are the game's calendar dates (the month
+  is the right one); (5) in `snapshot.json`, `finance.owner` is the player's company (a player state or
+  controller), `finance.capitalRaw` over `finance.capital` is the unit (100 for hundredths), and
+  `finance.historySize` is how many transactions the game remembers. Export CSV, and open it in Excel.
 - [ ] **Deadlines from the game.** When an urgent contract exists (small cargo, so far), press F8 and
   look in `snapshot.json` for `deadlineTicks` on that mission and `calendar.nowTicks`. The difference,
   divided by 36,000,000,000, should be the game hours left, and match the contract's timer in the game.

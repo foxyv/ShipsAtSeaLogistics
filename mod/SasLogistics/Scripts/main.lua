@@ -10,7 +10,7 @@
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-16.1"
+SCRIPT_VERSION = "2026-10-18.1"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -96,7 +96,7 @@ local function Try(fn, where)
     local ok, result = pcall(fn)
     if ok then return result end
     local message = (where or "?") .. ": " .. tostring(result):gsub("\n.*", ""):gsub("^.*Scripts\\", "")
-    if not ErrorSeen[message] and #Errors < 60 then
+    if ErrorSeen and not ErrorSeen[message] and #Errors < 60 then
         ErrorSeen[message] = true
         Errors[#Errors + 1] = message
     end
@@ -455,6 +455,53 @@ local function ExportPlayer()
 end
 
 ---------------------------------------------------------------------------------------------------
+-- Money. The game keeps a ledger of the company's transactions (a date, an amount and a description, such as
+-- a mission paid out) and the capital. An amount is a FDecimal, a whole number of the game's smallest unit;
+-- the capital is also given as the game's own conversion to a number, so that the planner can tell the unit.
+
+local function DecimalRaw(decimal)
+    return Try(function() return string.format("%d", decimal.Value) end, "decimal")
+end
+
+local function ExportFinance()
+    local best, bestSize = nil, -1
+    for _, comp in ipairs(FindAllOf("FinanceComponent") or {}) do
+        if IsObject(comp) and not (FullName(comp) or ""):find("Default__", 1, true) then
+            local size = 0
+            Try(function() Each(comp.Ledger.Transactions, function() size = size + 1 end) end, "ledger size")
+            local owner = ClassName(Try(function() return comp:GetOwner() end, "finance owner")) or ""
+            -- the player's company: a player state or controller owns it; failing that, the longest ledger
+            if owner:find("Player", 1, true) then size = size + 1000000 end
+            if size > bestSize then best, bestSize = comp, size end
+        end
+    end
+    if not best then return nil end
+    local finance = {
+        owner = ClassName(Try(function() return best:GetOwner() end, "finance owner")),
+        historySize = Try(function() return best.Ledger.TransactionHistorySize + 0 end, "history size"),
+        capitalRaw = DecimalRaw(best.Capital),
+        capital = Try(function()
+            local library = StaticFindObject("/Script/MiscMathUtilities.Default__DecimalMathLibrary")
+            return library:Conv_DecimalToFloat(best.Capital) + 0.0
+        end, "capital as a number"),
+        transactions = Arr(),
+    }
+    Try(function()
+        Each(best.Ledger.Transactions, function(tx)
+            local date = tx.Date
+            finance.transactions[#finance.transactions + 1] = {
+                day = Try(function() return date.Day.Day + 0 end, "ledger day"),
+                month = Try(function() return date.Month + 0 end, "ledger month"),  -- 0 for January
+                year = Try(function() return date.Year.Year + 0 end, "ledger year"),
+                raw = DecimalRaw(tx.Value),
+                description = Try(function() return tx.Description:ToString() end, "ledger description"),
+            }
+        end)
+    end, "ledger")
+    return finance
+end
+
+---------------------------------------------------------------------------------------------------
 
 local function Export(reason)
     Errors, ErrorSeen, Footprints = Arr(), {}, {}
@@ -473,7 +520,7 @@ local function Export(reason)
     end, "cell size")
     for name, section in pairs({
         missions = ExportMissions, containers = ExportContainers, ports = ExportPorts,
-        boats = ExportBoats, player = ExportPlayer, docks = ExportDocks,
+        boats = ExportBoats, player = ExportPlayer, docks = ExportDocks, finance = ExportFinance,
     }) do
         snapshot[name] = Try(section, name)
     end
@@ -995,5 +1042,6 @@ print("[SasLogistics] loaded: telemetry is on (a snapshot every " .. AUTO_EXPORT
 -- For the tests (app/tests/lua_harness.py): when a test sets SAS_TEST before loading this script, the local
 -- functions and values the tests need are handed out in SasTest. In the game SAS_TEST is never set.
 if SAS_TEST then
-    SasTest = { ReadHighlights = ReadHighlights, UnloadWanted = UnloadWanted, ORANGE = ORANGE, GREEN = GREEN }
+    SasTest = { ReadHighlights = ReadHighlights, UnloadWanted = UnloadWanted, ORANGE = ORANGE, GREEN = GREEN,
+                ExportFinance = ExportFinance }
 end

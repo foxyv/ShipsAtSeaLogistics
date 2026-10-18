@@ -13,13 +13,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from . import searoutes
 from .mapview import MapView
+from .ledger import Ledger, exact, write_csv
 from .model import BOAT, Snapshot, load_snapshot, read_no_room
 from .packing import Hold
 from .planner import (
@@ -56,6 +57,13 @@ DISTANCE_UNITS = {
     "nm": ("Nautical miles (nm)", 1.852),
     "mi": ("Miles (mi)", 1.609344),
 }
+
+
+def default_ledger_path() -> str:
+    """Where the planner keeps its history of transactions: its own folder, not the mod's (which is deleted when
+    the mod is removed)."""
+    base = os.environ.get("APPDATA") or str(Path.home())
+    return str(Path(base) / "SasLogistics" / "ledger.json")
 
 
 def default_snapshot_path() -> str:
@@ -122,13 +130,14 @@ class PlanRunner(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: QSettings | None = None, path: str | None = None):
+    def __init__(self, settings: QSettings | None = None, path: str | None = None, ledger_path: str | None = None):
         super().__init__()
         self.setWindowTitle("Ships At Sea Logistics")
         self.resize(1150, 720)
         self.settings = settings or QSettings("SasLogistics", "Planner")  # tests pass settings of their own
         self.path = path or self.settings.value("snapshotPath", default_snapshot_path())
         self.snap = Snapshot()
+        self.ledger = Ledger(ledger_path or default_ledger_path())  # transactions, kept beyond what the game remembers
         self.mtime = None
         self.sea_km: dict = {}  # (port, port) -> km by sea; empty until sea routes are known
         self.sea_routes: dict = {}  # "A|B" -> the route itself, for drawing on the map
@@ -181,6 +190,7 @@ class MainWindow(QMainWindow):
         aboard_tab.setLayout(aboard_layout)
         self.tabs.addTab(aboard_tab, "On board")
         self.tabs.addTab(self.matrix, "Cargo by port")
+        self.tabs.addTab(self._transactions_tab(), "Transactions")
         self.tabs.addTab(self._route_tab(), "Route")
         self.map = MapView()
         self.tabs.addTab(self.map, "Map")
@@ -520,6 +530,7 @@ class MainWindow(QMainWindow):
         self._fill_contracts()
         self._fill_matrix()
         self._fill_aboard()
+        self._update_transactions()
 
         wanted = self.start_port.currentData() if self.start_port.currentIndex() > 0 else None
         self.start_port.blockSignals(True)
@@ -532,6 +543,101 @@ class MainWindow(QMainWindow):
             self.start_port.setCurrentIndex(max(0, self.start_port.findData(wanted)))
         self.start_port.blockSignals(False)
         self.follow()
+
+    # ------------------------------------------------------------------------------------------ transactions
+
+    def _transactions_tab(self) -> QWidget:
+        self.tx_summary = QLabel()
+        self.tx_summary.setWordWrap(True)
+        self.tx_note = QLabel()
+        self.tx_note.setWordWrap(True)
+        self.tx_note.setStyleSheet("color: #e5484d;")
+        self.tx_note.hide()
+        self.tx_filter = QLineEdit()
+        self.tx_filter.setPlaceholderText("Filter by description, date or amount…")
+        self.tx_filter.setClearButtonEnabled(True)
+        self.tx_filter.textChanged.connect(lambda *_: self._fill_transactions())
+        export = QPushButton("Export CSV…")
+        export.setToolTip("Saves the transactions shown (all of them when nothing is typed in the filter) with exact "
+                          "amounts, for a spreadsheet.")
+        export.clicked.connect(self.export_transactions)
+        clear = QPushButton("Clear saved history")
+        clear.setToolTip("Forgets the history saved by the planner. The game's own recent list fills it again.")
+        clear.clicked.connect(self.clear_transactions)
+        bar = QHBoxLayout()
+        bar.addWidget(self.tx_filter, 1)
+        bar.addWidget(export)
+        bar.addWidget(clear)
+        self.transactions = self._table(["Date", "Description", "Amount", "Balance after"])
+        layout = QVBoxLayout()
+        layout.addWidget(self.tx_summary)
+        layout.addWidget(self.tx_note)
+        layout.addLayout(bar)
+        layout.addWidget(self.transactions, 1)
+        tab = QWidget()
+        tab.setLayout(layout)
+        return tab
+
+    def _update_transactions(self):
+        added = self.ledger.merge(self.snap.finance)
+        self._fill_transactions()
+        return added
+
+    def _shown_transactions(self):
+        """The ledger's rows, newest first, that pass the filter."""
+        needle = self.tx_filter.text().strip().lower()
+        unit = self.ledger.unit
+        rows = self.ledger.rows()
+        if not needle:
+            return rows
+        return [(e, b) for e, b in rows
+                if needle in e.description.lower() or needle in e.date or needle in exact(e.raw, unit)]
+
+    def _fill_transactions(self):
+        ledger, unit = self.ledger, self.ledger.unit
+        shown = self._shown_transactions()
+        rows = []
+        for entry, balance in shown:
+            rows.append([QTableWidgetItem(entry.date), QTableWidgetItem(entry.description),
+                         NumberItem(entry.raw / unit, exact(entry.raw, unit, group=True)),
+                         NumberItem(0 if balance is None else balance / unit,
+                                    "" if balance is None else exact(balance, unit, group=True))])
+        self._fill(self.transactions, rows)
+        income, spent, net = ledger.totals([e for e, _ in shown])
+        text = f"{len(shown)} of {len(ledger.entries)} transactions"
+        if shown:
+            text += f"  ·  in {exact(income, unit, True)}  ·  out {exact(-spent, unit, True)}  ·  net {exact(net, unit, True)}"
+        if ledger.capital_raw is not None:
+            text += f"  ·  capital now {exact(ledger.capital_raw, unit, True)}"
+        if not ledger.entries:
+            text = ("No transactions yet. The SasLogistics mod writes the game's ledger into each snapshot (press F8 in "
+                    "game); it needs the version of the mod that has this.")
+        self.tx_summary.setText(text)
+        self.tx_note.setText(ledger.note)
+        self.tx_note.setVisible(bool(ledger.note))
+
+    def export_transactions(self):
+        shown = self._shown_transactions()
+        if not shown:
+            QMessageBox.information(self, "Export transactions", "There are no transactions to export.")
+            return
+        start = str(Path.home() / "Documents" / "ships-at-sea-transactions.csv")
+        chosen, _ = QFileDialog.getSaveFileName(self, "Export transactions", start, "CSV files (*.csv)")
+        if not chosen:
+            return
+        try:
+            count = write_csv(chosen, list(reversed(shown)), self.ledger.unit)  # oldest first, for a spreadsheet
+        except OSError as error:
+            QMessageBox.warning(self, "Export transactions", f"Could not write the file: {error}")
+            return
+        self.status.setText(f"Exported {count} transactions to {chosen}")
+
+    def clear_transactions(self):
+        if QMessageBox.question(self, "Clear saved history",
+                                "Forget the transactions saved by the planner? The game's own recent list will fill "
+                                "it again; older ones will be gone.") == QMessageBox.Yes:
+            self.ledger.clear()
+            self._update_transactions()
 
     def _fill(self, table, rows):
         table.setSortingEnabled(False)

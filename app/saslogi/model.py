@@ -144,6 +144,7 @@ class Snapshot:
     cruise_knots: float | None = None  # how fast the owned boat being driven sails
     now_ticks: int | None = None  # the game calendar's time now, in the same ticks as a contract's deadline
     game_speed: float = 1.0  # game seconds that pass in a real second
+    finance: dict | None = None  # the game's ledger of transactions and the capital, as the mod wrote them
 
     def sail_hours(self, km: float) -> float:
         """Game hours to sail `km`: the real time it takes at the boat's cruising speed, times how many
@@ -277,6 +278,7 @@ def parse_snapshot(data: dict) -> Snapshot:
     calendar = data.get("calendar") or {}
     snap.now_ticks = _ticks(calendar.get("nowTicks"))
     snap.game_speed = float(calendar.get("gameSpeed") or 1.0)
+    snap.finance = data.get("finance") if isinstance(data.get("finance"), dict) else None
     for raw in data.get("ports") or []:
         if raw.get("id"):
             snap.ports[raw["id"]] = Port(raw["id"], raw.get("name") or raw["id"], _vec(raw.get("location")))
