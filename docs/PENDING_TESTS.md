@@ -108,12 +108,6 @@ not Ctrl+R. Keep the debug logging in until these are done.
   as before. Unticked, he moves only pieces marked by hand with F5. Highlighting works with either
   setting. Start the planner before the game so `crane_orders.txt` exists.
 
-- [ ] **No stutter when the warehouse window is open (script 2026-10-18.3).** Put items into a warehouse (or open
-  its window) with something marked: the game should no longer stutter once a second for about 20 seconds. The
-  highlight colours must still be right: marked pieces green (load) or orange (unload), others untinted, and the
-  tint must come back after you take an item out and the window refills. If a pass is slow the log says
-  `highlight pass took N ms: ... slot(s) looked at, ... repainted`. Also note the time of any stutter when pulling
-  up to a dock and look in `UE4SS.log` for what ran then (nothing in the logs explains it yet).
 - [ ] **Planning for finished contracts.** The game pays a contract when its last piece is delivered, so the planner
   now earns money and counts a contract only when the route finishes it (partial deliveries count for half), and a
   finished contract carries a bonus in every priority (the weighted score's default contracts weight is 2). Plan
@@ -130,3 +124,4 @@ the operator's character on deck after a load; the operator put back on the boat
 after a load (`putting them back on the boat` in the log); Shift+F5 switching the hover hint off and on; the
 invert mouse setting in a crane's camera (both settings); the crane's motor sounds; the wake keeps going when you leave the helm; parking
 along one route and smooth motion between steps; Røst's large-cargo dock recognised as Røst.
+The warehouse window no longer stutters (script 2026-10-18.3: each inventory slot is asked about once and repainted only when it changes). Stutter when pulling up to a dock was not explained: note the time and check `UE4SS.log` if it happens again.
