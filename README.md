@@ -85,8 +85,10 @@ the cells as blocked, and the route summary names it.
 **Cargo that came aboard after the route was planned.** A piece loaded by hand (or by the crane operator under
 an older plan) has no line in the route, so nothing used to be shown or sent for it until the route was
 worked out again. Now, at each snapshot, a piece on the boat for the port it is docked at is added to that
-stop's unloads at once (so it is shown, and the crane operator is told to unload it), and any other piece the
-route does not mention makes the planner work the route out again, once for each new set of such pieces.
+stop's unloads at once (so it is shown, and the crane operator is told to unload it). Any other piece the route
+does not mention is pointed out on the first stop ("Aboard, but not in this route"); the route itself is never
+changed behind your back, because a new route replaces the orders the operator is carrying out and pieces are
+moved back and forth. Press *Replan from here* to include them.
 
 **Transactions.** The *Transactions* tab lists the company's money movements as the game's own ledger
 records them: the date, the description the game gives (a mission paid out, a fee, a purchase) and the exact
