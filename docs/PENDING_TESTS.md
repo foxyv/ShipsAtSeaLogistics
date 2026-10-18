@@ -108,6 +108,21 @@ not Ctrl+R. Keep the debug logging in until these are done.
   as before. Unticked, he moves only pieces marked by hand with F5. Highlighting works with either
   setting. Start the planner before the game so `crane_orders.txt` exists.
 
+- [ ] **No stutter when the warehouse window is open (script 2026-10-18.3).** Put items into a warehouse (or open
+  its window) with something marked: the game should no longer stutter once a second for about 20 seconds. The
+  highlight colours must still be right: marked pieces green (load) or orange (unload), others untinted, and the
+  tint must come back after you take an item out and the window refills. If a pass is slow the log says
+  `highlight pass took N ms: ... slot(s) looked at, ... repainted`. Also note the time of any stutter when pulling
+  up to a dock and look in `UE4SS.log` for what ran then (nothing in the logs explains it yet).
+- [ ] **Planning for finished contracts.** The game pays a contract when its last piece is delivered, so the planner
+  now earns money and counts a contract only when the route finishes it (partial deliveries count for half), and a
+  finished contract carries a bonus in every priority (the weighted score's default contracts weight is 2). Plan
+  from a real snapshot: the route should finish more contracts than before, and the "earned" figure per stop should
+  appear at the stop that delivers a contract's last piece. Check it against the Transactions tab after delivering.
+- [ ] **Cargo the route puts off is ordered off.** Dock where the route says to leave cargo (the pipe stacks at
+  Fenes, close to Bodo): the crane operator unloads it (`crane_orders.txt` has `GUID U` lines) instead of only
+  listing it in `removable.txt`.
+
 ## Done
 
 Confirmed in play, kept here for reference: turning a load once, in one direction, before a set-down;
